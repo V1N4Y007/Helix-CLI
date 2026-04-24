@@ -320,13 +320,7 @@ fn prepare_tokio_command(
     let mut prepared = TokioCommand::new(program);
     #[cfg(windows)]
     if program == "cmd" {
-        // tokio::process::Command lacks a direct raw_arg method.
-        // We can get around this by passing it as standard arg, 
-        // but wait! tokio's Command on Windows DOES have raw_arg if we use 
-        // std::os::windows::process::CommandExt ?? No, tokio does not expose it.
-        // Let's just use .arg() for tokio and see if it compiles, or maybe Tokio doesn't quote?
-        // Actually, let's use prepared.raw_arg(command) and see if tokio supports it natively.
-        prepared.raw_arg(command).current_dir(cwd);
+        prepared.arg(arg).raw_arg(command).current_dir(cwd);
     } else {
         prepared.arg(arg).arg(command).current_dir(cwd);
     }

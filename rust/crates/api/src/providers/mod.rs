@@ -181,6 +181,15 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
             default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
         });
     }
+    // Route any Gemma model via the OpenAI-compatible REST API directly to Ollama
+    if canonical.starts_with("gemma") {
+        return Some(ProviderMetadata {
+            provider: ProviderKind::OpenAi,
+            auth_env: "OPENAI_API_KEY",
+            base_url_env: "OPENAI_BASE_URL",
+            default_base_url: "http://localhost:11434/v1",
+        });
+    }
     // Explicit provider-namespaced models (e.g. "openai/gpt-4.1-mini") must
     // route to the correct provider regardless of which auth env vars are set.
     // Without this, detect_provider_kind falls through to the auth-sniffer
@@ -288,6 +297,12 @@ pub fn model_token_limit(model: &str) -> Option<ModelTokenLimit> {
         "grok-3" | "grok-3-mini" => Some(ModelTokenLimit {
             max_output_tokens: 64_000,
             context_window_tokens: 131_072,
+        }),
+        "gemma4:e4b" => Some(ModelTokenLimit {
+            // Lower max output tokens fixes context bloat rejections on Ollama endpoints
+            max_output_tokens: 4_096,
+            // 256k context as per user limits
+            context_window_tokens: 256_000,
         }),
         // Kimi models via DashScope (Moonshot AI)
         // Source: https://platform.moonshot.cn/docs/intro

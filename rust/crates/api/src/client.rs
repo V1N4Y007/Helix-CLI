@@ -39,6 +39,13 @@ impl ProviderClient {
                     Some(meta) if meta.auth_env == "DASHSCOPE_API_KEY" => {
                         OpenAiCompatConfig::dashscope()
                     }
+                    Some(meta) => {
+                        let mut config = OpenAiCompatConfig::openai();
+                        config.api_key_env = meta.auth_env;
+                        config.base_url_env = meta.base_url_env;
+                        config.default_base_url = meta.default_base_url;
+                        config
+                    }
                     _ => OpenAiCompatConfig::openai(),
                 };
                 Ok(Self::OpenAi(OpenAiCompatClient::from_env(config)?))

@@ -248,6 +248,20 @@ fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> 
     resolve_sandbox_status_for_request(&request, cwd)
 }
 
+fn shell_program_and_args() -> (&'static str, &'static str) {
+    if cfg!(windows) {
+        if std::process::Command::new("sh").arg("-c").arg("exit 0").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false) {
+            ("sh", "-lc")
+        } else if std::process::Command::new("bash").arg("-c").arg("exit 0").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false) {
+            ("bash", "-lc")
+        } else {
+            ("cmd", "/C")
+        }
+    } else {
+        ("sh", "-lc")
+    }
+}
+
 fn prepare_command(
     command: &str,
     cwd: &std::path::Path,
@@ -266,8 +280,9 @@ fn prepare_command(
         return prepared;
     }
 
-    let mut prepared = Command::new("sh");
-    prepared.arg("-lc").arg(command).current_dir(cwd);
+    let (program, arg) = shell_program_and_args();
+    let mut prepared = Command::new(program);
+    prepared.arg(arg).arg(command).current_dir(cwd);
     if sandbox_status.filesystem_active {
         prepared.env("HOME", cwd.join(".sandbox-home"));
         prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
@@ -293,8 +308,9 @@ fn prepare_tokio_command(
         return prepared;
     }
 
-    let mut prepared = TokioCommand::new("sh");
-    prepared.arg("-lc").arg(command).current_dir(cwd);
+    let (program, arg) = shell_program_and_args();
+    let mut prepared = TokioCommand::new(program);
+    prepared.arg(arg).arg(command).current_dir(cwd);
     if sandbox_status.filesystem_active {
         prepared.env("HOME", cwd.join(".sandbox-home"));
         prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));

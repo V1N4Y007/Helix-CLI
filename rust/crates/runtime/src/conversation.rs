@@ -742,7 +742,12 @@ fn build_assistant_message(
         ));
     }
     if blocks.is_empty() {
-        return Err(RuntimeError::new("assistant stream produced no content"));
+        // Local models (e.g. Gemma via Ollama) sometimes return an empty
+        // response after completing a tool call, meaning "I'm done".
+        // Synthesise a silent empty text block so the turn ends cleanly.
+        blocks.push(ContentBlock::Text {
+            text: String::new(),
+        });
     }
 
     Ok((

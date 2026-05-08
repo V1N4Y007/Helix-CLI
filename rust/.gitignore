@@ -5,3 +5,9 @@ target/
 .claw/settings.local.json
 .claw/sessions/
 .clawhip/
+
+# Environment variables
+.env
+
+# Scratch files
+nim_test.json

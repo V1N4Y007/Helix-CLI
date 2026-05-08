@@ -349,9 +349,11 @@ where
                 return Err(error);
             }
 
+            let trimmed_messages =
+                trim_messages_to_token_budget(&self.session.messages);
             let request = ApiRequest {
                 system_prompt: self.system_prompt.clone(),
-                messages: self.session.messages.clone(),
+                messages: trimmed_messages,
             };
             let events = match self.api_client.stream(request) {
                 Ok(events) => events,
@@ -1813,4 +1815,110 @@ mod tests {
         // then
         assert_eq!(error.to_string(), "upstream failed");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Context trimming helpers
+// ---------------------------------------------------------------------------
+
+/// Tokens-per-byte approximation used for budget estimation.
+/// 1 token ≈ 4 chars for English prose; we use 3 to be conservative.
+const BYTES_PER_TOKEN_ESTIMATE: usize = 3;
+
+/// Maximum context budget before trimming kicks in (80% of 128k tokens).
+const CONTEXT_BUDGET_TOKENS: usize = 102_400;
+
+/// Tool outputs longer than this are truncated to avoid filling the context.
+const MAX_TOOL_OUTPUT_BYTES: usize = 8 * 1024; // 8 KB
+
+/// Minimum number of recent turns always preserved even when over budget.
+const MIN_RECENT_TURNS: usize = 10;
+
+/// Return a possibly-shortened view of `messages` that fits within the
+/// estimated token budget.  The in-memory `Session` is not mutated — this
+/// only affects what is sent to the provider for each individual request.
+///
+/// Strategy:
+/// 1. Truncate individual tool outputs that exceed `MAX_TOOL_OUTPUT_BYTES`.
+/// 2. Always keep the `MIN_RECENT_TURNS` most recent messages.
+/// 3. Drop the oldest messages until the estimate is within budget.
+fn trim_messages_to_token_budget(messages: &[ConversationMessage]) -> Vec<ConversationMessage> {
+    // First pass: truncate oversized tool outputs.
+    let truncated: Vec<ConversationMessage> = messages
+        .iter()
+        .map(|msg| {
+            let needs_truncation = msg.blocks.iter().any(|b| {
+                matches!(b, ContentBlock::ToolResult { output, .. }
+                    if output.len() > MAX_TOOL_OUTPUT_BYTES)
+            });
+            if !needs_truncation {
+                return msg.clone();
+            }
+            let blocks = msg
+                .blocks
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        tool_name,
+                        output,
+                        is_error,
+                    } if output.len() > MAX_TOOL_OUTPUT_BYTES => {
+                        let truncated_output = format!(
+                            "{}\n[output truncated — {} bytes omitted]",
+                            &output[..MAX_TOOL_OUTPUT_BYTES],
+                            output.len() - MAX_TOOL_OUTPUT_BYTES
+                        );
+                        ContentBlock::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            tool_name: tool_name.clone(),
+                            output: truncated_output,
+                            is_error: *is_error,
+                        }
+                    }
+                    other => other.clone(),
+                })
+                .collect();
+            ConversationMessage {
+                role: msg.role,
+                blocks,
+                usage: msg.usage,
+            }
+        })
+        .collect();
+
+    // Compute total estimated tokens.
+    let total_bytes: usize = truncated.iter().flat_map(|m| m.blocks.iter()).map(|b| {
+        match b {
+            ContentBlock::Text { text } => text.len(),
+            ContentBlock::ToolUse { input, .. } => input.len(),
+            ContentBlock::ToolResult { output, .. } => output.len(),
+        }
+    }).sum();
+
+    let estimated_tokens = total_bytes / BYTES_PER_TOKEN_ESTIMATE;
+
+    if estimated_tokens <= CONTEXT_BUDGET_TOKENS {
+        return truncated;
+    }
+
+    // Second pass: drop oldest messages, keeping MIN_RECENT_TURNS at minimum.
+    let keep_from = truncated.len().saturating_sub(MIN_RECENT_TURNS);
+    let mut start = 0;
+    while start < keep_from {
+        let remaining_bytes: usize = truncated[start..].iter()
+            .flat_map(|m| m.blocks.iter())
+            .map(|b| match b {
+                ContentBlock::Text { text } => text.len(),
+                ContentBlock::ToolUse { input, .. } => input.len(),
+                ContentBlock::ToolResult { output, .. } => output.len(),
+            })
+            .sum();
+        if remaining_bytes / BYTES_PER_TOKEN_ESTIMATE <= CONTEXT_BUDGET_TOKENS {
+            break;
+        }
+        start += 1;
+    }
+
+    truncated[start..].to_vec()
 }

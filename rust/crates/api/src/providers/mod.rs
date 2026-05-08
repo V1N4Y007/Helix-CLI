@@ -33,6 +33,8 @@ pub enum ProviderKind {
     Anthropic,
     Xai,
     OpenAi,
+    /// NVIDIA NIM hosted inference (OpenAI-compatible endpoint).
+    NvidiaAi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +133,24 @@ const MODEL_REGISTRY: &[(&str, ProviderMetadata)] = &[
             default_base_url: openai_compat::DEFAULT_DASHSCOPE_BASE_URL,
         },
     ),
+    (
+        "glm",
+        ProviderMetadata {
+            provider: ProviderKind::NvidiaAi,
+            auth_env: "NVIDIA_API_KEY",
+            base_url_env: "NVIDIA_BASE_URL",
+            default_base_url: openai_compat::DEFAULT_NVIDIA_BASE_URL,
+        },
+    ),
+    (
+        "glm-5.1",
+        ProviderMetadata {
+            provider: ProviderKind::NvidiaAi,
+            auth_env: "NVIDIA_API_KEY",
+            base_url_env: "NVIDIA_BASE_URL",
+            default_base_url: openai_compat::DEFAULT_NVIDIA_BASE_URL,
+        },
+    ),
 ];
 
 #[must_use]
@@ -157,6 +177,10 @@ pub fn resolve_model_alias(model: &str) -> String {
                     "kimi" => "kimi-k2.5",
                     _ => trimmed,
                 },
+                ProviderKind::NvidiaAi => match *alias {
+                    "glm" => "glm-5.1",
+                    _ => trimmed,
+                },
             })
         })
         .map_or_else(|| trimmed.to_string(), ToOwned::to_owned)
@@ -181,15 +205,18 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
             default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
         });
     }
-    // Route any Gemma model via the OpenAI-compatible REST API directly to Ollama
-    if canonical.starts_with("gemma") {
+    // NVIDIA NIM hosted inference — z-ai/*, glm-*, and nim/* prefix.
+    // Reads NVIDIA_API_KEY; base URL defaults to integrate.api.nvidia.com/v1.
+    if canonical.starts_with("glm") || canonical.starts_with("nim/") || canonical.starts_with("z-ai/") {
         return Some(ProviderMetadata {
-            provider: ProviderKind::OpenAi,
-            auth_env: "OPENAI_API_KEY",
-            base_url_env: "OPENAI_BASE_URL",
-            default_base_url: "http://localhost:11434/v1",
+            provider: ProviderKind::NvidiaAi,
+            auth_env: "NVIDIA_API_KEY",
+            base_url_env: "NVIDIA_BASE_URL",
+            default_base_url: openai_compat::DEFAULT_NVIDIA_BASE_URL,
         });
     }
+    // Gemma and other local models fall through to the generic OPENAI_BASE_URL
+    // env-var path (e.g. Ollama at http://localhost:11434/v1).
     // Explicit provider-namespaced models (e.g. "openai/gpt-4.1-mini") must
     // route to the correct provider regardless of which auth env vars are set.
     // Without this, detect_provider_kind falls through to the auth-sniffer
@@ -232,6 +259,10 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
 pub fn detect_provider_kind(model: &str) -> ProviderKind {
     if let Some(metadata) = metadata_for_model(model) {
         return metadata.provider;
+    }
+    // NVIDIA_API_KEY present without a recognised model prefix: route to NIM.
+    if openai_compat::has_api_key("NVIDIA_API_KEY") {
+        return ProviderKind::NvidiaAi;
     }
     // When OPENAI_BASE_URL is set, the user explicitly configured an
     // OpenAI-compatible endpoint. Prefer it over the Anthropic fallback
@@ -309,6 +340,12 @@ pub fn model_token_limit(model: &str) -> Option<ModelTokenLimit> {
         "kimi-k2.5" | "kimi-k1.5" => Some(ModelTokenLimit {
             max_output_tokens: 16_384,
             context_window_tokens: 256_000,
+        }),
+        // GLM-5.1 via NVIDIA NIM: 128k context window, 8k max output tokens.
+        // Source: NVIDIA NIM / Zhipu AI documentation.
+        "glm-5.1" | "glm" => Some(ModelTokenLimit {
+            max_output_tokens: 8_192,
+            context_window_tokens: 131_072,
         }),
         _ => None,
     }

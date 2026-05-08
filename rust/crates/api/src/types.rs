@@ -39,6 +39,61 @@ impl MessageRequest {
         self.stream = true;
         self
     }
+
+    /// Apply an agent execution mode profile, tuning inference parameters
+    /// to match the desired speed/capability trade-off.
+    ///
+    /// | Mode  | reasoning_effort | temperature | tool_choice |
+    /// |-------|-----------------|-------------|-------------|
+    /// | FAST  | off             | 0.3         | unchanged   |
+    /// | SMART | "high"          | —           | unchanged   |
+    /// | AUTO  | "high"          | —           | Auto        |
+    #[must_use]
+    pub fn with_agent_mode(mut self, mode: AgentMode) -> Self {
+        match mode {
+            AgentMode::Fast => {
+                self.reasoning_effort = None;
+                self.temperature = Some(0.3);
+            }
+            AgentMode::Smart => {
+                self.reasoning_effort = Some("high".to_string());
+                self.temperature = None;
+            }
+            AgentMode::Auto => {
+                self.reasoning_effort = Some("high".to_string());
+                self.temperature = None;
+                self.tool_choice = Some(ToolChoice::Auto);
+            }
+        }
+        self
+    }
+}
+
+/// Agent execution mode controlling inference parameters and tool availability.
+///
+/// Stored in `.claw/settings.json` as `"agentMode": "fast" | "smart" | "auto"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentMode {
+    /// Quick conversational tasks — reasoning off, low temperature.
+    Fast,
+    /// Coding / multi-step reasoning — reasoning on, no tools forced.
+    Smart,
+    /// Autonomous agent loop — reasoning on, tools enabled (default).
+    #[default]
+    Auto,
+}
+
+impl AgentMode {
+    /// Parse from a string (case-insensitive). Returns `Auto` for unknown values.
+    #[must_use]
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "fast" => Self::Fast,
+            "smart" => Self::Smart,
+            _ => Self::Auto,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

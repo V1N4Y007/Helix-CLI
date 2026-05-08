@@ -19,6 +19,8 @@ use super::{preflight_message_request, Provider, ProviderFuture};
 pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_DASHSCOPE_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+/// NVIDIA NIM hosted inference endpoint (OpenAI-compatible).
+pub const DEFAULT_NVIDIA_BASE_URL: &str = "https://integrate.api.nvidia.com/v1";
 const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
 const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
@@ -41,11 +43,13 @@ pub struct OpenAiCompatConfig {
 const XAI_ENV_VARS: &[&str] = &["XAI_API_KEY"];
 const OPENAI_ENV_VARS: &[&str] = &["OPENAI_API_KEY"];
 const DASHSCOPE_ENV_VARS: &[&str] = &["DASHSCOPE_API_KEY"];
+const NVIDIA_ENV_VARS: &[&str] = &["NVIDIA_API_KEY"];
 
 // Provider-specific request body size limits in bytes
 const XAI_MAX_REQUEST_BODY_BYTES: usize = 52_428_800; // 50MB
 const OPENAI_MAX_REQUEST_BODY_BYTES: usize = 104_857_600; // 100MB
 const DASHSCOPE_MAX_REQUEST_BODY_BYTES: usize = 6_291_456; // 6MB (observed limit in dogfood)
+const NVIDIA_MAX_REQUEST_BODY_BYTES: usize = OPENAI_MAX_REQUEST_BODY_BYTES; // 100MB (same as OpenAI)
 
 impl OpenAiCompatConfig {
     #[must_use]
@@ -85,12 +89,27 @@ impl OpenAiCompatConfig {
         }
     }
 
+    /// NVIDIA NIM hosted inference endpoint.
+    /// Uses the OpenAI-compatible REST shape at /v1.
+    /// Reads `NVIDIA_API_KEY` / `NVIDIA_BASE_URL` from the environment.
+    #[must_use]
+    pub const fn nvidia_nim() -> Self {
+        Self {
+            provider_name: "NVIDIA NIM",
+            api_key_env: "NVIDIA_API_KEY",
+            base_url_env: "NVIDIA_BASE_URL",
+            default_base_url: DEFAULT_NVIDIA_BASE_URL,
+            max_request_body_bytes: NVIDIA_MAX_REQUEST_BODY_BYTES,
+        }
+    }
+
     #[must_use]
     pub fn credential_env_vars(self) -> &'static [&'static str] {
         match self.provider_name {
             "xAI" => XAI_ENV_VARS,
             "OpenAI" => OPENAI_ENV_VARS,
             "DashScope" => DASHSCOPE_ENV_VARS,
+            "NVIDIA NIM" => NVIDIA_ENV_VARS,
             _ => &[],
         }
     }
@@ -795,6 +814,8 @@ pub fn is_reasoning_model(model: &str) -> bool {
         || canonical.starts_with("qwen-qwq")
         || canonical.starts_with("qwq")
         || canonical.contains("thinking")
+        // NVIDIA NIM GLM-5.1: reasoning model — strip temperature/top_p
+        || canonical.starts_with("glm")
 }
 
 /// Strip routing prefix (e.g., "openai/gpt-4" → "gpt-4") for the wire.

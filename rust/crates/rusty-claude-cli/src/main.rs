@@ -56,7 +56,7 @@ use tools::{
     execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
 };
 
-const DEFAULT_MODEL: &str = "gemma4:e4b";
+const DEFAULT_MODEL: &str = "z-ai/glm-5.1";
 
 /// #148: Model provenance for `claw status` JSON/text output. Records where
 /// the resolved model string came from so claws don't have to re-read argv
@@ -399,7 +399,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
             let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
-            cli.set_reasoning_effort(reasoning_effort);
+            cli.set_reasoning_effort(reasoning_effort.clone());
+            cli.apply_config_agent_mode(&reasoning_effort);
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
         }
         CliAction::Doctor { output_format } => run_doctor(output_format)?,
@@ -1483,6 +1484,11 @@ fn validate_model_syntax(model: &str) -> Result<(), String> {
             err_msg.push_str(trimmed);
             err_msg.push_str("`? (Requires XAI_API_KEY env var)");
         }
+        else if trimmed.starts_with("glm") {
+            err_msg.push_str("\nDid you mean `z-ai/");
+            err_msg.push_str(trimmed);
+            err_msg.push_str("`? (Requires NVIDIA_API_KEY env var)");
+        }
         return Err(err_msg);
     }
     Ok(())
@@ -1575,6 +1581,14 @@ fn config_model_for_current_dir() -> Option<String> {
     loader.load().ok()?.model().map(ToOwned::to_owned)
 }
 
+/// Reads `agentMode` from the current directory's settings chain.
+/// Returns `None` when no config is found (default is Auto at call-site).
+fn config_agent_mode_for_current_dir() -> Option<String> {
+    let cwd = env::current_dir().ok()?;
+    let loader = ConfigLoader::default_for(&cwd);
+    loader.load().ok()?.agent_mode().map(ToOwned::to_owned)
+}
+
 fn resolve_repl_model(cli_model: String) -> String {
     if cli_model != DEFAULT_MODEL {
         return cli_model;
@@ -1597,6 +1611,7 @@ fn provider_label(kind: ProviderKind) -> &'static str {
         ProviderKind::Anthropic => "anthropic",
         ProviderKind::Xai => "xai",
         ProviderKind::OpenAi => "openai",
+        ProviderKind::NvidiaAi => "nvidia-nim",
     }
 }
 
@@ -4167,6 +4182,27 @@ impl LiveCli {
     fn set_reasoning_effort(&mut self, effort: Option<String>) {
         if let Some(rt) = self.runtime.runtime.as_mut() {
             rt.api_client_mut().set_reasoning_effort(effort);
+        }
+    }
+
+    /// Apply the agent mode from `.claw/settings.json` (`agentMode` key).
+    /// When the CLI flag `--reasoning-effort` was already set explicitly,
+    /// that wins and this is a no-op.
+    fn apply_config_agent_mode(&mut self, cli_reasoning_effort: &Option<String>) {
+        // If the user passed --reasoning-effort explicitly, respect it.
+        if cli_reasoning_effort.is_some() {
+            return;
+        }
+        let mode_str = config_agent_mode_for_current_dir()
+            .unwrap_or_else(|| "auto".to_string());
+        let mode = api::AgentMode::from_str_lossy(&mode_str);
+        match mode {
+            api::AgentMode::Fast => {
+                self.set_reasoning_effort(None);
+            }
+            api::AgentMode::Smart | api::AgentMode::Auto => {
+                self.set_reasoning_effort(Some("high".to_string()));
+            }
         }
     }
 
@@ -7467,17 +7503,17 @@ impl AnthropicRuntimeClient {
                     .with_prompt_cache(PromptCache::new(session_id));
                 ApiProviderClient::Anthropic(inner)
             }
-            ProviderKind::Xai | ProviderKind::OpenAi => {
+            ProviderKind::Xai | ProviderKind::OpenAi | ProviderKind::NvidiaAi => {
                 // The api crate's `ProviderClient::from_model_with_anthropic_auth`
                 // with `None` for the anthropic auth routes via
                 // `detect_provider_kind` and builds an
                 // `OpenAiCompatClient::from_env` with the matching
-                // `OpenAiCompatConfig` (openai / xai / dashscope).
+                // `OpenAiCompatConfig` (openai / xai / dashscope / nvidia-nim).
                 // That reads the correct API-key env var and BASE_URL
                 // override internally, so this one call covers OpenAI,
-                // OpenRouter, xAI, DashScope, Ollama, and any other
-                // OpenAI-compat endpoint users configure via
-                // `OPENAI_BASE_URL` / `XAI_BASE_URL` / `DASHSCOPE_BASE_URL`.
+                // OpenRouter, xAI, DashScope, NVIDIA NIM, Ollama, and any
+                // other OpenAI-compat endpoint users configure via
+                // `OPENAI_BASE_URL` / `XAI_BASE_URL` / `NVIDIA_BASE_URL`.
                 ApiProviderClient::from_model_with_anthropic_auth(&resolved_model, None)?
             }
         };

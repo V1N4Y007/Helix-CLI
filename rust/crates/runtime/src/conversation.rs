@@ -349,8 +349,7 @@ where
                 return Err(error);
             }
 
-            let trimmed_messages =
-                trim_messages_to_token_budget(&self.session.messages);
+            let trimmed_messages = trim_messages_to_token_budget(&self.session.messages);
             let request = ApiRequest {
                 system_prompt: self.system_prompt.clone(),
                 messages: trimmed_messages,
@@ -1888,13 +1887,15 @@ fn trim_messages_to_token_budget(messages: &[ConversationMessage]) -> Vec<Conver
         .collect();
 
     // Compute total estimated tokens.
-    let total_bytes: usize = truncated.iter().flat_map(|m| m.blocks.iter()).map(|b| {
-        match b {
+    let total_bytes: usize = truncated
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .map(|b| match b {
             ContentBlock::Text { text } => text.len(),
             ContentBlock::ToolUse { input, .. } => input.len(),
             ContentBlock::ToolResult { output, .. } => output.len(),
-        }
-    }).sum();
+        })
+        .sum();
 
     let estimated_tokens = total_bytes / BYTES_PER_TOKEN_ESTIMATE;
 
@@ -1906,7 +1907,8 @@ fn trim_messages_to_token_budget(messages: &[ConversationMessage]) -> Vec<Conver
     let keep_from = truncated.len().saturating_sub(MIN_RECENT_TURNS);
     let mut start = 0;
     while start < keep_from {
-        let remaining_bytes: usize = truncated[start..].iter()
+        let remaining_bytes: usize = truncated[start..]
+            .iter()
             .flat_map(|m| m.blocks.iter())
             .map(|b| match b {
                 ContentBlock::Text { text } => text.len(),

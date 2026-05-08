@@ -172,7 +172,7 @@ async fn execute_bash_async(
 ) -> io::Result<BashCommandOutput> {
     // Detect and emit ship provenance for git push operations
     detect_and_emit_ship_prepared(&input.command);
-    
+
     let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
 
     let output_result = if let Some(timeout_ms) = input.timeout {
@@ -250,9 +250,25 @@ fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> 
 
 fn shell_program_and_args() -> (&'static str, &'static str) {
     if cfg!(windows) {
-        if std::process::Command::new("sh").arg("-c").arg("exit 0").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false) {
+        if std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
             ("sh", "-lc")
-        } else if std::process::Command::new("bash").arg("-c").arg("exit 0").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false) {
+        } else if std::process::Command::new("bash")
+            .arg("-c")
+            .arg("exit 0")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
             ("bash", "-lc")
         } else {
             ("cmd", "/C")

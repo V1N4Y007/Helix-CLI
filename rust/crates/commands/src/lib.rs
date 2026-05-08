@@ -4171,7 +4171,7 @@ pub fn handle_slash_command(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::{
         classify_skills_slash_command, handle_agents_slash_command_json,

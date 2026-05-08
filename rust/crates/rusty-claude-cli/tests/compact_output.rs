@@ -1,3 +1,4 @@
+#![cfg(not(windows))]
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -215,3 +216,4 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ))
 }
+

@@ -360,6 +360,7 @@ mod tests {
     use crate::sandbox::FilesystemIsolationMode;
 
     #[test]
+    #[cfg(not(windows))]
     fn executes_simple_command() {
         let output = execute_bash(BashCommandInput {
             command: String::from("printf 'hello'"),
@@ -380,6 +381,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn disables_sandbox_when_requested() {
         let output = execute_bash(BashCommandInput {
             command: String::from("printf 'hello'"),

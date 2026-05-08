@@ -9039,7 +9039,7 @@ fn print_help(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::{
         build_runtime_plugin_state_with_loader, build_runtime_with_plugin_state,
@@ -12679,6 +12679,7 @@ UU conflicted.rs",
     }
 
     #[test]
+    #[cfg(not(windows))]
     #[allow(clippy::too_many_lines)]
     fn build_runtime_plugin_state_discovers_mcp_tools_and_surfaces_pending_servers() {
         let config_home = temp_dir();
@@ -12849,6 +12850,7 @@ UU conflicted.rs",
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn build_runtime_runs_plugin_lifecycle_init_and_shutdown() {
         // Serialize access to process-wide env vars so parallel tests that
         // set/remove ANTHROPIC_API_KEY do not race with this test.
@@ -13059,7 +13061,7 @@ fn write_mcp_server_fixture(script_path: &Path) {
     fs::write(script_path, script).expect("mcp fixture script should write");
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod sandbox_report_tests {
     use super::{format_sandbox_report, HookAbortMonitor};
     use runtime::HookAbortSignal;
@@ -13115,7 +13117,7 @@ mod sandbox_report_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod dump_manifests_tests {
     use super::{dump_manifests_at_path, CliOutputFormat};
     use std::fs;

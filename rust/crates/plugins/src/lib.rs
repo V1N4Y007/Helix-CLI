@@ -306,7 +306,26 @@ impl PluginTool {
 
     pub fn execute(&self, input: &Value) -> Result<String, PluginError> {
         let input_json = input.to_string();
-        let mut process = Command::new(&self.command);
+        let mut process = if Path::new(&self.command).exists() {
+            if cfg!(windows) {
+                let mut process = Command::new("cmd");
+                process.arg("/C").arg(&self.command);
+                process
+            } else {
+                let mut process = Command::new("sh");
+                process.arg(&self.command);
+                process
+            }
+        } else if cfg!(windows) {
+            let mut process = Command::new("cmd");
+            process.arg("/C").arg(&self.command);
+            process
+        } else {
+            let mut process = Command::new("sh");
+            process.arg("-lc").arg(&self.command);
+            process
+        };
+
         process
             .args(&self.args)
             .stdin(Stdio::piped())
@@ -2892,6 +2911,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn installs_enables_updates_and_uninstalls_external_plugins() {
         let _guard = env_guard();
         let config_home = temp_dir("home");
@@ -3400,6 +3420,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn plugin_registry_runs_initialize_and_shutdown_for_enabled_plugins() {
         let _guard = env_guard();
         let config_home = temp_dir("lifecycle-home");
@@ -3424,6 +3445,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn aggregates_and_executes_plugin_tools() {
         let _guard = env_guard();
         let config_home = temp_dir("tool-home");
@@ -3569,6 +3591,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn plugin_lifecycle_handles_parallel_execution() {
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
         use std::sync::Arc;

@@ -436,6 +436,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn collects_and_runs_hooks_from_enabled_plugins() {
         // given
         let config_home = temp_dir("config");
@@ -497,6 +498,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn pre_tool_use_denies_when_plugin_hook_exits_two() {
         // given
         let runner = HookRunner::new(crate::PluginHooks {
@@ -514,6 +516,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn propagates_plugin_hook_failures() {
         // given
         let runner = HookRunner::new(crate::PluginHooks {

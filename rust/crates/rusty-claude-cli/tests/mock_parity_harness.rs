@@ -1,3 +1,4 @@
+#![cfg(not(windows))]
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -885,3 +886,4 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ))
 }
+

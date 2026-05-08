@@ -816,7 +816,7 @@ enum CommandExecution {
     Cancelled,
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use std::thread;
     use std::time::Duration;

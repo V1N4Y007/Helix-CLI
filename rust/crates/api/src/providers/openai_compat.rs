@@ -460,6 +460,8 @@ impl OpenAiSseParser {
 struct StreamState {
     model: String,
     message_started: bool,
+    thinking_started: bool,
+    thinking_finished: bool,
     text_started: bool,
     text_finished: bool,
     finished: bool,
@@ -473,6 +475,8 @@ impl StreamState {
         Self {
             model,
             message_started: false,
+            thinking_started: false,
+            thinking_finished: false,
             text_started: false,
             text_finished: false,
             finished: false,
@@ -516,18 +520,42 @@ impl StreamState {
         }
 
         for choice in chunk.choices {
+            if let Some(reasoning) = choice.delta.reasoning_content.filter(|value| !value.is_empty()) {
+                if !self.thinking_started {
+                    self.thinking_started = true;
+                    events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                        index: 0,
+                        content_block: OutputContentBlock::Thinking {
+                            thinking: String::new(),
+                            signature: None,
+                        },
+                    }));
+                }
+                events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                    index: 0,
+                    delta: ContentBlockDelta::ThinkingDelta { thinking: reasoning },
+                }));
+            }
+
             if let Some(content) = choice.delta.content.filter(|value| !value.is_empty()) {
+                if self.thinking_started && !self.thinking_finished {
+                    self.thinking_finished = true;
+                    events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                        index: 0,
+                    }));
+                }
+                let text_index = if self.thinking_started { 1 } else { 0 };
                 if !self.text_started {
                     self.text_started = true;
                     events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
-                        index: 0,
+                        index: text_index,
                         content_block: OutputContentBlock::Text {
                             text: String::new(),
                         },
                     }));
                 }
                 events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-                    index: 0,
+                    index: text_index,
                     delta: ContentBlockDelta::TextDelta { text: content },
                 }));
             }
@@ -580,10 +608,17 @@ impl StreamState {
         self.finished = true;
 
         let mut events = Vec::new();
-        if self.text_started && !self.text_finished {
-            self.text_finished = true;
+        if self.thinking_started && !self.thinking_finished {
+            self.thinking_finished = true;
             events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
                 index: 0,
+            }));
+        }
+        if self.text_started && !self.text_finished {
+            self.text_finished = true;
+            let text_index = if self.thinking_started { 1 } else { 0 };
+            events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                index: text_index,
             }));
         }
 
@@ -758,6 +793,8 @@ struct ChunkChoice {
 struct ChunkDelta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default, deserialize_with = "deserialize_null_as_empty_vec")]
     tool_calls: Vec<DeltaToolCall>,
 }

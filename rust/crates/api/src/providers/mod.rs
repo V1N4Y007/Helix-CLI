@@ -505,9 +505,18 @@ pub(crate) fn load_dotenv_file(
 /// Returns `None` when the file is missing, the key is absent, or the value
 /// is empty.
 pub(crate) fn dotenv_value(key: &str) -> Option<String> {
-    let cwd = std::env::current_dir().ok()?;
-    let values = load_dotenv_file(&cwd.join(".env"))?;
-    values.get(key).filter(|value| !value.is_empty()).cloned()
+    let mut current = std::env::current_dir().ok()?;
+    loop {
+        if let Some(values) = load_dotenv_file(&current.join(".env")) {
+            if let Some(value) = values.get(key).filter(|value| !value.is_empty()) {
+                return Some(value.clone());
+            }
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    None
 }
 
 #[cfg(test)]

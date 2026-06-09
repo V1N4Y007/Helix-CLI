@@ -498,6 +498,18 @@ where
                 self.record_tool_finished(iterations, &result_message);
                 tool_results.push(result_message);
             }
+
+            if tool_results.iter().any(|msg| {
+                msg.blocks.iter().any(|block| {
+                    if let ContentBlock::ToolResult { tool_name, .. } = block {
+                        matches!(tool_name.as_str(), "SendUserMessage" | "Brief" | "AskUserQuestion")
+                    } else {
+                        false
+                    }
+                })
+            }) {
+                break;
+            }
         }
 
         let auto_compaction = self.maybe_auto_compact();

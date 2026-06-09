@@ -247,6 +247,16 @@ impl GlobalToolRegistry {
     pub fn definitions(&self, allowed_tools: Option<&BTreeSet<String>>) -> Vec<ToolDefinition> {
         let builtin = mvp_tool_specs()
             .into_iter()
+            .filter(|spec| {
+                if allowed_tools.is_none() {
+                    matches!(
+                        spec.name,
+                        "bash" | "read_file" | "write_file" | "edit_file" | "glob_search" | "grep_search" | "WebFetch" | "WebSearch" | "REPL" | "PowerShell"
+                    )
+                } else {
+                    true
+                }
+            })
             .filter(|spec| allowed_tools.is_none_or(|allowed| allowed.contains(spec.name)))
             .map(|spec| ToolDefinition {
                 name: spec.name.to_string(),
@@ -2349,7 +2359,8 @@ struct SleepInput {
 #[derive(Debug, Deserialize)]
 struct BriefInput {
     message: String,
-    attachments: Option<Vec<String>>,
+    #[serde(default)]
+    attachments: Option<serde_json::Value>,
     status: BriefStatus,
 }
 
@@ -5241,16 +5252,33 @@ fn execute_brief(input: BriefInput) -> Result<BriefOutput, String> {
         return Err(String::from("message must not be empty"));
     }
 
-    let attachments = input
-        .attachments
-        .as_ref()
-        .map(|paths| {
-            paths
+    let mut parsed_attachments = Vec::new();
+    if let Some(val) = input.attachments.as_ref() {
+        if let Some(arr) = val.as_array() {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    parsed_attachments.push(s.to_string());
+                }
+            }
+        } else if let Some(s) = val.as_str() {
+            if let Ok(arr) = serde_json::from_str::<Vec<String>>(s) {
+                parsed_attachments = arr;
+            } else if !s.trim().is_empty() && s != "[]" {
+                parsed_attachments.push(s.to_string());
+            }
+        }
+    }
+
+    let attachments = if parsed_attachments.is_empty() {
+        None
+    } else {
+        Some(
+            parsed_attachments
                 .iter()
                 .map(|path| resolve_attachment(path))
-                .collect::<Result<Vec<_>, String>>()
-        })
-        .transpose()?;
+                .collect::<Result<Vec<_>, String>>()?
+        )
+    };
 
     let message = match input.status {
         BriefStatus::Normal | BriefStatus::Proactive => input.message,
@@ -5546,7 +5574,7 @@ struct ReplRuntime {
 fn resolve_repl_runtime(language: &str) -> Result<ReplRuntime, String> {
     match language.trim().to_ascii_lowercase().as_str() {
         "python" | "py" => Ok(ReplRuntime {
-            program: detect_first_command(&["python3", "python"])
+            program: detect_first_command(&["py", "python3", "python"])
                 .ok_or_else(|| String::from("python runtime not found"))?,
             args: &["-c"],
         }),

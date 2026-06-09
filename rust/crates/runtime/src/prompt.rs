@@ -498,9 +498,11 @@ fn get_simple_doing_tasks_section() -> String {
         "Read relevant code before changing it and keep changes tightly scoped to the request.".to_string(),
         "Do not add speculative abstractions, compatibility shims, or unrelated cleanup.".to_string(),
         "Do not create files unless they are required to complete the task.".to_string(),
+        "ALWAYS use the write_file tool to create files. Do NOT use bash echo or shell redirection to write files, as it corrupts quotes and formatting on Windows.".to_string(),
         "If an approach fails, diagnose the failure before switching tactics.".to_string(),
         "Be careful not to introduce security vulnerabilities such as command injection, XSS, or SQL injection.".to_string(),
         "Report outcomes faithfully: if verification fails or was not run, say so explicitly.".to_string(),
+        "If the user is just greeting you or engaging in casual conversation, reply directly with text instead of needlessly invoking tools.".to_string(),
     ]);
 
     std::iter::once("# Doing tasks".to_string())
@@ -513,6 +515,9 @@ fn get_actions_section() -> String {
     [
         "# Executing actions with care".to_string(),
         "Carefully consider reversibility and blast radius. Local, reversible actions like editing files or running tests are usually fine. Actions that affect shared systems, publish state, delete data, or otherwise have high blast radius should be explicitly authorized by the user or durable workspace instructions.".to_string(),
+        "".to_string(),
+        "CRITICAL INSTRUCTION FOR TOOL USAGE:".to_string(),
+        "When the user greets you or asks casual conversational questions, you MUST respond warmly with raw text. Do not use 'bash' or any other tool to format or send your response; just speak naturally.".to_string(),
     ]
     .join("\n")
 }

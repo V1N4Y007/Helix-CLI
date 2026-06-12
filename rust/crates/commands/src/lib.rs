@@ -1034,6 +1034,35 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         argument_hint: None,
         resume_supported: true,
     },
+    // ── Security Assessment Commands ──────────────────────────────────
+    SlashCommandSpec {
+        name: "vulnscan",
+        aliases: &["va", "pentest"],
+        summary: "Run an autonomous web vulnerability assessment",
+        argument_hint: Some("<url> [--scope owasp|full|recon]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "recon",
+        aliases: &[],
+        summary: "Run web reconnaissance on a target URL",
+        argument_hint: Some("<url>"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "exploit-db",
+        aliases: &["cve"],
+        summary: "Search for CVEs affecting a product/version",
+        argument_hint: Some("<product> [version]"),
+        resume_supported: false,
+    },
+    SlashCommandSpec {
+        name: "sec-report",
+        aliases: &[],
+        summary: "Generate an HTML vulnerability report from findings",
+        argument_hint: Some("[--findings <path>]"),
+        resume_supported: false,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1117,6 +1146,19 @@ pub enum SlashCommand {
     Advisor,
     Stickers,
     Insights,
+    // ── Security Assessment Variants ─────────────────────────────────
+    Vulnscan {
+        target: Option<String>,
+    },
+    Recon {
+        target: Option<String>,
+    },
+    ExploitDb {
+        query: Option<String>,
+    },
+    SecReport {
+        args: Option<String>,
+    },
     Thinkback,
     ReleaseNotes,
     SecurityReview,
@@ -1256,6 +1298,10 @@ impl SlashCommand {
             Self::Insights => "/insights",
             Self::Thinkback => "/thinkback",
             Self::ReleaseNotes => "/release-notes",
+            Self::Vulnscan { .. } => "/vulnscan",
+            Self::Recon { .. } => "/recon",
+            Self::ExploitDb { .. } => "/exploit-db",
+            Self::SecReport { .. } => "/sec-report",
             Self::SecurityReview => "/security-review",
             Self::Keybindings => "/keybindings",
             Self::PrivacySettings => "/privacy-settings",
@@ -1491,6 +1537,11 @@ pub fn validate_slash_command_input(
         "history" => SlashCommand::History {
             count: optional_single_arg(command, &args, "[count]")?,
         },
+        // ── Security Assessment Commands ──────────────────────────────
+        "vulnscan" | "va" | "pentest" => SlashCommand::Vulnscan { target: remainder },
+        "recon" => SlashCommand::Recon { target: remainder },
+        "exploit-db" | "cve" => SlashCommand::ExploitDb { query: remainder },
+        "sec-report" => SlashCommand::SecReport { args: remainder },
         other => SlashCommand::Unknown(other.to_string()),
     }))
 }
@@ -4167,6 +4218,10 @@ pub fn handle_slash_command(
         | SlashCommand::OutputStyle { .. }
         | SlashCommand::AddDir { .. }
         | SlashCommand::History { .. }
+        | SlashCommand::Vulnscan { .. }
+        | SlashCommand::Recon { .. }
+        | SlashCommand::ExploitDb { .. }
+        | SlashCommand::SecReport { .. }
         | SlashCommand::Unknown(_) => None,
     }
 }

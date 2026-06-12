@@ -3475,7 +3475,11 @@ fn run_resume_command(
         | SlashCommand::Ide { .. }
         | SlashCommand::Tag { .. }
         | SlashCommand::OutputStyle { .. }
-        | SlashCommand::AddDir { .. } => Err("unsupported resumed slash command".into()),
+        | SlashCommand::AddDir { .. }
+        | SlashCommand::Vulnscan { .. }
+        | SlashCommand::Recon { .. }
+        | SlashCommand::ExploitDb { .. }
+        | SlashCommand::SecReport { .. } => Err("unsupported resumed slash command".into()),
     }
 }
 
@@ -4581,6 +4585,111 @@ impl LiveCli {
             | SlashCommand::AddDir { .. } => {
                 let cmd_name = command.slash_name();
                 eprintln!("{cmd_name} is not yet implemented in this build.");
+                false
+            }
+            // ── Security Assessment Dispatch ─────────────────────────────
+            SlashCommand::Vulnscan { target } => {
+                let url = match target {
+                    Some(ref url) if !url.is_empty() => url.clone(),
+                    _ => {
+                        eprintln!("Usage: /vulnscan <url> [--scope owasp|full|recon]");
+                        eprintln!("  Example: /vulnscan https://example.com");
+                        return Ok(false);
+                    }
+                };
+                // Auto-enable danger-full-access for VA mode
+                if self.permission_mode != PermissionMode::DangerFullAccess {
+                    self.permission_mode = PermissionMode::DangerFullAccess;
+                    eprintln!("\x1b[33m⚡ Auto-enabled danger-full-access for security assessment\x1b[0m");
+                }
+                eprintln!("\x1b[38;5;196m");
+                eprintln!("  ██╗  ██╗███████╗██╗     ██╗██╗  ██╗    ███████╗███████╗ ██████╗");
+                eprintln!("  ██║  ██║██╔════╝██║     ██║╚██╗██╔╝    ██╔════╝██╔════╝██╔════╝");
+                eprintln!("  ███████║█████╗  ██║     ██║ ╚███╔╝     ███████╗█████╗  ██║     ");
+                eprintln!("  ██╔══██║██╔══╝  ██║     ██║ ██╔██╗     ╚════██║██╔══╝  ██║     ");
+                eprintln!("  ██║  ██║███████╗███████╗██║██╔╝ ██╗    ███████║███████╗╚██████╗");
+                eprintln!("  ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝╚═╝  ╚═╝    ╚══════╝╚══════╝ ╚═════╝\x1b[0m");
+                eprintln!();
+                eprintln!("  \x1b[1;33m⚠️  AUTHORIZED TARGETS ONLY — Scanning without permission is illegal.\x1b[0m");
+                eprintln!("  \x1b[2mTarget: {url}\x1b[0m");
+                eprintln!();
+
+                let prompt = format!(
+                    "You are HELIX-SEC, an autonomous web vulnerability assessment engine. \
+                     Your target is {url}. \
+                     \n\nSTEP 1 (MANDATORY — DO THIS FIRST): Call the 'WebSecScan' tool with: \
+                     {{\"url\": \"{url}\", \"scan_type\": \"full\", \"payloads\": [\"' OR 1=1--\", \"<script>alert(1)</script>\"]}}. \
+                     The tool will automatically inject a comprehensive payload suite and analyze \
+                     security headers. Wait for the results. \
+                     \n\nSTEP 2 (MANDATORY — DO THIS AFTER STEP 1 COMPLETES): Call the 'VulnReport' tool with: \
+                     {{\"findings_json\": \"AUTO\", \"target\": \"{url}\", \"output_path\": \"helix-sec-report.html\"}}. \
+                     \n\nSTEP 3: Present a summary of findings to the operator. \
+                     \n\nRULES: \
+                     - Do NOT call the Skill tool. The methodology is embedded in this prompt. \
+                     - Do NOT skip Step 1. You MUST call WebSecScan before VulnReport. \
+                     - Do NOT call WebSecScan more than once unless asked. The built-in suite is comprehensive. \
+                     - Do NOT hallucinate tool names. Only use: WebSecScan, VulnReport, write_file."
+                );
+                // Clear old findings before a fresh scan
+                let _ = std::fs::remove_file("helix-sec-findings.json");
+
+                self.run_turn(&prompt)?;
+                false
+            }
+            SlashCommand::Recon { target } => {
+                let url = match target {
+                    Some(ref url) if !url.is_empty() => url.clone(),
+                    _ => {
+                        eprintln!("Usage: /recon <url>");
+                        return Ok(false);
+                    }
+                };
+                let prompt = format!(
+                    "Perform web reconnaissance on {url}. Analyze HTTP headers, fingerprint \
+                     technologies, check security headers (HSTS, CSP, X-Frame-Options, CORS), \
+                     probe for common paths (/robots.txt, /sitemap.xml, /.env, /.git/config, \
+                     /api/, /graphql, /admin), and search for known CVEs affecting detected \
+                     software versions. Use bash with curl, WebFetch, and WebSearch. \
+                     Present findings in a structured format."
+                );
+                self.run_turn(&prompt)?;
+                false
+            }
+            SlashCommand::ExploitDb { query } => {
+                let product = match query {
+                    Some(ref q) if !q.is_empty() => q.clone(),
+                    _ => {
+                        eprintln!("Usage: /exploit-db <product> [version]");
+                        eprintln!("  Example: /exploit-db Apache 2.4.49");
+                        return Ok(false);
+                    }
+                };
+                let prompt = format!(
+                    "Search for known CVEs and exploits affecting: {product}. Use WebSearch to \
+                     query NVD, CVE databases, and exploit-db. For each result, provide: \
+                     CVE ID, CVSS score, description, affected versions, and available exploits \
+                     or PoC references. Prioritize by severity."
+                );
+                self.run_turn(&prompt)?;
+                false
+            }
+            SlashCommand::SecReport { args } => {
+                let context = args.unwrap_or_default();
+                let prompt = format!(
+                    "Load the offensive-reporting skill for methodology. Generate a professional \
+                     HTML vulnerability assessment report. {context_hint} \
+                     The report should include: executive summary, risk heatmap, detailed findings \
+                     with CVSS v3.1 scores and remediation advice, attack chain narratives, and \
+                     strategic recommendations. Save as helix-sec-report.html. Use a dark-themed \
+                     professional design with HELIX branding.",
+                    context_hint = if context.is_empty() {
+                        "Use findings from helix-sec-findings.json if available, otherwise \
+                         summarize findings from the current session.".to_string()
+                    } else {
+                        format!("Context: {context}")
+                    }
+                );
+                self.run_turn(&prompt)?;
                 false
             }
             SlashCommand::Unknown(name) => {

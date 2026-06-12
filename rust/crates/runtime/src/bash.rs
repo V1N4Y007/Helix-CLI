@@ -19,9 +19,10 @@ use crate::ConfigLoader;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BashCommandInput {
     pub command: String,
+    #[serde(default, deserialize_with = "deserialize_optional_number_from_string")]
     pub timeout: Option<u64>,
     pub description: Option<String>,
-    #[serde(rename = "run_in_background")]
+    #[serde(rename = "run_in_background", default, deserialize_with = "deserialize_optional_bool_from_string")]
     pub run_in_background: Option<bool>,
     #[serde(rename = "dangerouslyDisableSandbox")]
     pub dangerously_disable_sandbox: Option<bool>,
@@ -65,6 +66,38 @@ pub struct BashCommandOutput {
     pub persisted_output_size: Option<u64>,
     #[serde(rename = "sandboxStatus")]
     pub sandbox_status: Option<SandboxStatus>,
+}
+
+pub fn deserialize_optional_bool_from_string<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match v {
+        Some(serde_json::Value::Bool(b)) => Ok(Some(b)),
+        Some(serde_json::Value::String(s)) => {
+            if s.eq_ignore_ascii_case("true") {
+                Ok(Some(true))
+            } else if s.eq_ignore_ascii_case("false") {
+                Ok(Some(false))
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+pub fn deserialize_optional_number_from_string<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match v {
+        Some(serde_json::Value::Number(n)) => Ok(n.as_u64()),
+        Some(serde_json::Value::String(s)) => Ok(s.parse::<u64>().ok()),
+        _ => Ok(None),
+    }
 }
 
 /// Executes a shell command with the requested sandbox settings.

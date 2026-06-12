@@ -347,7 +347,7 @@ impl GlobalToolRegistry {
     }
 
     pub fn execute(&self, name: &str, input: &Value) -> Result<String, String> {
-        if mvp_tool_specs().iter().any(|spec| spec.name == name) {
+        if mvp_tool_specs().iter().any(|spec| spec.name == name) || name == "run_web_sec_scan" {
             return execute_tool_with_enforcer(self.enforcer.as_ref(), name, input);
         }
         self.plugin_tools
@@ -514,6 +514,45 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "WebSecScan",
+            description: "Intelligent web vulnerability scanner with built-in endpoint discovery. Modes: (1) 'recon' — crawls the page to discover links, forms, parameters, and security headers. Returns a map of attack surfaces. (2) 'full'/'owasp' — crawls AND auto-tests all discovered parameters with payloads (built-in suite + your custom payloads). (3) 'targeted' — tests only the URLs you specify in 'test_urls' (you craft the full URL with payloads in the right params). Best workflow: first call with scan_type='recon' to discover endpoints, analyze results, then call again with scan_type='targeted' and test_urls containing your crafted attack URLs.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "format": "uri", "description": "Target URL to scan" },
+                    "scan_type": { "type": "string", "description": "'recon' for discovery only, 'full' for auto-crawl+test, 'targeted' for testing specific URLs" },
+                    "payloads": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Custom payloads to test. Built-in payloads are always included in 'full' mode."
+                    },
+                    "test_urls": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "For 'targeted' mode: exact URLs with payloads already injected in the right parameters, e.g. 'http://target/search?q=\' OR 1=1--'"
+                    }
+                },
+                "required": ["url", "scan_type"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "VulnReport",
+            description: "Generate a professional HTML vulnerability report from JSON findings. You can pass \"AUTO\" for findings_json to automatically load the accumulated findings from helix-sec-findings.json.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "findings_json": { "type": "string", "description": "Pass 'AUTO' to use accumulated findings" },
+                    "target": { "type": "string" },
+                    "output_path": { "type": "string" }
+                },
+                "required": ["findings_json", "target", "output_path"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
             name: "WebSearch",
@@ -1234,6 +1273,8 @@ fn execute_tool_with_enforcer(
             from_value::<GrepSearchInput>(input).and_then(run_grep_search)
         }
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
+        "WebSecScan" | "run_web_sec_scan" => from_value::<WebSecScanInput>(input).and_then(run_web_sec_scan),
+        "VulnReport" => from_value::<VulnReportInput>(input).and_then(run_vuln_report),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
@@ -1381,6 +1422,697 @@ fn run_ask_user_question(input: AskUserQuestionInput) -> Result<String, String> 
         "question": input.question,
         "answer": answer,
         "status": "answered"
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
+    let (url, scan_type, payloads_val, test_urls) = match input {
+        WebSecScanInput::Wrapped { input } => {
+            let parsed: serde_json::Value = serde_json::from_str(&input)
+                .map_err(|e| format!("failed to parse wrapped input: {}", e))?;
+            let url = parsed.get("url").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let scan_type = parsed.get("scan_type").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let payloads = parsed.get("payloads").cloned();
+            let test_urls: Option<Vec<String>> = parsed.get("test_urls").and_then(|v| {
+                v.as_array().map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            });
+            (url, scan_type, payloads, test_urls)
+        }
+        WebSecScanInput::Direct { url, scan_type, payloads, test_urls } => (url, scan_type, payloads, test_urls),
+    };
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // ── Phase 0: Baseline request ────────────────────────────────────
+    let res = client.get(&url).send().map_err(|e| e.to_string())?;
+    let status = res.status().as_u16();
+    let headers: std::collections::HashMap<String, String> = res
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
+        .collect();
+    let body = res.text().unwrap_or_default();
+
+    // ── Phase 1: Endpoint Discovery (Crawling) ──────────────────────
+    let parsed_base = url::Url::parse(&url).unwrap_or_else(|_| url::Url::parse("http://localhost").unwrap());
+    let base_url = format!("{}://{}", parsed_base.scheme(), parsed_base.host_str().unwrap_or("localhost"));
+    let target_host = parsed_base.host_str().unwrap_or("").to_string();
+
+    let mut discovered_endpoints: Vec<serde_json::Value> = Vec::new();
+    // (full_endpoint_url, param_name)
+    let mut discovered_params: Vec<(String, String)> = Vec::new();
+    let mut seen_params: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Extract href attributes
+    let href_re = regex::Regex::new(r#"href\s*=\s*["']([^"'#]+)["']"#).unwrap();
+    for cap in href_re.captures_iter(&body) {
+        let href = cap[1].trim();
+        if href.is_empty() || href.starts_with("javascript:") || href.starts_with("mailto:") {
+            continue;
+        }
+        let full_url = if href.starts_with("http") {
+            href.to_string()
+        } else if href.starts_with('/') {
+            format!("{}{}", base_url, href)
+        } else {
+            format!("{}/{}", url.trim_end_matches('/'), href)
+        };
+        // Only keep same-origin links
+        if !full_url.contains(&target_host) { continue; }
+        if let Ok(parsed_url) = url::Url::parse(&full_url) {
+            let params: Vec<(String, String)> = parsed_url.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            if !params.is_empty() {
+                let base_path = format!("{}://{}{}", parsed_url.scheme(), parsed_url.host_str().unwrap_or(""), parsed_url.path());
+                for (k, _) in &params {
+                    let key = format!("{}?{}", base_path, k);
+                    if seen_params.insert(key) {
+                        discovered_params.push((base_path.clone(), k.clone()));
+                    }
+                }
+                discovered_endpoints.push(json!({
+                    "type": "link",
+                    "url": full_url,
+                    "path": parsed_url.path(),
+                    "parameters": params.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>()
+                }));
+            } else {
+                discovered_endpoints.push(json!({
+                    "type": "link",
+                    "url": full_url,
+                    "path": parsed_url.path()
+                }));
+            }
+        }
+    }
+
+    // Extract forms with actions and input fields
+    let form_re = regex::Regex::new(r#"(?is)<form[^>]*>(.*?)</form>"#).unwrap();
+    let action_re = regex::Regex::new(r#"(?i)action\s*=\s*["']([^"']*)["']"#).unwrap();
+    let input_re = regex::Regex::new(r#"(?i)<input[^>]*name\s*=\s*["']([^"']+)["'][^>]*>"#).unwrap();
+    let method_re = regex::Regex::new(r#"(?i)method\s*=\s*["']([^"']+)["']"#).unwrap();
+
+    for form_cap in form_re.captures_iter(&body) {
+        let form_html = &form_cap[0];
+        let form_body = &form_cap[1];
+        let action = action_re.captures(form_html)
+            .map(|m| m[1].to_string())
+            .unwrap_or_default();
+        let method = method_re.captures(form_html)
+            .map(|m| m[1].to_uppercase())
+            .unwrap_or_else(|| "GET".to_string());
+
+        let form_url = if action.is_empty() || action == "#" {
+            url.clone()
+        } else if action.starts_with("http") {
+            action.clone()
+        } else if action.starts_with('/') {
+            format!("{}{}", base_url, action)
+        } else {
+            format!("{}/{}", url.trim_end_matches('/'), action)
+        };
+
+        let mut input_names: Vec<String> = Vec::new();
+        for input_cap in input_re.captures_iter(form_body) {
+            let name = input_cap[1].to_string();
+            let key = format!("{}?{}", form_url, name);
+            if seen_params.insert(key) {
+                discovered_params.push((form_url.clone(), name.clone()));
+            }
+            input_names.push(name);
+        }
+
+        if !input_names.is_empty() {
+            discovered_endpoints.push(json!({
+                "type": "form",
+                "action": form_url,
+                "method": method,
+                "parameters": input_names
+            }));
+        }
+    }
+
+    // ── Security Header Analysis ─────────────────────────────────────
+    let mut findings: Vec<serde_json::Value> = Vec::new();
+
+    if !headers.contains_key("strict-transport-security") {
+        findings.push(json!({"vulnerability": "Missing HSTS Header", "severity": "Medium", "url": url, "evidence": "No Strict-Transport-Security header.", "remediation": "Add: Strict-Transport-Security: max-age=31536000; includeSubDomains"}));
+    }
+    if !headers.contains_key("content-security-policy") {
+        findings.push(json!({"vulnerability": "Missing CSP Header", "severity": "Medium", "url": url, "evidence": "No Content-Security-Policy header.", "remediation": "Add: Content-Security-Policy: default-src 'self'"}));
+    }
+    if !headers.contains_key("x-frame-options") {
+        findings.push(json!({"vulnerability": "Missing X-Frame-Options (Clickjacking)", "severity": "Low", "url": url, "evidence": "No X-Frame-Options header.", "remediation": "Add: X-Frame-Options: DENY"}));
+    }
+    if !headers.contains_key("x-content-type-options") {
+        findings.push(json!({"vulnerability": "Missing X-Content-Type-Options", "severity": "Low", "url": url, "evidence": "No X-Content-Type-Options: nosniff header.", "remediation": "Add: X-Content-Type-Options: nosniff"}));
+    }
+    if let Some(sv) = headers.get("server") {
+        if sv.contains('/') {
+            findings.push(json!({"vulnerability": "Server Version Disclosure", "severity": "Informational", "url": url, "evidence": format!("Server: {}", sv), "remediation": "Suppress version in Server header."}));
+        }
+    }
+    if let Some(v) = headers.get("x-aspnet-version") {
+        findings.push(json!({"vulnerability": "ASP.NET Version Disclosure", "severity": "Low", "url": url, "evidence": format!("X-AspNet-Version: {}", v), "remediation": "Set enableVersionHeader=false in web.config."}));
+    }
+    if let Some(v) = headers.get("x-powered-by") {
+        findings.push(json!({"vulnerability": "X-Powered-By Disclosure", "severity": "Low", "url": url, "evidence": format!("X-Powered-By: {}", v), "remediation": "Remove X-Powered-By header."}));
+    }
+    if let Some(cv) = headers.get("set-cookie") {
+        let cl = cv.to_lowercase();
+        if !cl.contains("secure") {
+            findings.push(json!({"vulnerability": "Cookie Missing Secure Flag", "severity": "Medium", "url": url, "evidence": format!("Set-Cookie: {}", cv), "remediation": "Add Secure flag."}));
+        }
+        if !cl.contains("samesite") {
+            findings.push(json!({"vulnerability": "Cookie Missing SameSite", "severity": "Low", "url": url, "evidence": format!("Set-Cookie: {}", cv), "remediation": "Add SameSite=Strict."}));
+        }
+    }
+
+    // ── Recon-only mode ──────────────────────────────────────────────
+    let scan_lower = scan_type.to_lowercase();
+    if scan_lower == "recon" {
+        let findings_path = std::path::PathBuf::from("helix-sec-findings.json");
+        let mut all = Vec::new();
+        if findings_path.exists() {
+            if let Ok(c) = std::fs::read_to_string(&findings_path) {
+                if let Ok(e) = serde_json::from_str::<Vec<serde_json::Value>>(&c) { all.extend(e); }
+            }
+        }
+        for f in &findings { let fs = f.to_string(); if !all.iter().any(|e| e.to_string() == fs) { all.push(f.clone()); } }
+        let _ = std::fs::write(&findings_path, serde_json::to_string_pretty(&all).unwrap_or_else(|_| "[]".to_string()));
+
+        return to_pretty_json(json!({
+            "target": url,
+            "scan_type": "recon",
+            "baseline_status": status,
+            "headers": headers,
+            "discovered_endpoints": discovered_endpoints,
+            "discovered_parameters": discovered_params.iter().map(|(ep, p)| json!({"endpoint": ep, "param": p})).collect::<Vec<_>>(),
+            "header_findings_count": findings.len(),
+            "header_findings": findings,
+            "NEXT_STEP": "Analyze discovered endpoints/parameters. Call WebSecScan with scan_type='targeted' and test_urls with your crafted payloads injected into the real parameters."
+        }));
+    }
+
+    // ── Build payload list ───────────────────────────────────────────
+    let mut payloads: Vec<String> = Vec::new();
+    if let Some(val) = payloads_val {
+        if val.is_array() {
+            payloads = val.as_array().unwrap().iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        } else if val.is_string() {
+            let s = val.as_str().unwrap();
+            if s != "null" && s != "[]" {
+                if let Ok(arr) = serde_json::from_str::<Vec<String>>(s) { payloads = arr; }
+                else { payloads.push(s.to_string()); }
+            }
+        }
+    }
+    // Add built-in payloads for full/owasp mode
+    if scan_lower == "full" || scan_lower == "owasp" || scan_lower.is_empty() {
+        for p in &["' OR 1=1--", "' UNION SELECT NULL,NULL,NULL--", "admin'--",
+                    "<script>alert(1)</script>", "<img src=x onerror=alert(1)>", "\"><svg onload=alert(1)>",
+                    "; ls -la", "| cat /etc/passwd", "$(id)",
+                    "../../../../etc/passwd", "..\\..\\..\\..\\windows\\win.ini",
+                    "{{7*7}}", "${7*7}",
+                    "http://169.254.169.254/latest/meta-data/"] {
+            let ps = p.to_string();
+            if !payloads.contains(&ps) { payloads.push(ps); }
+        }
+    }
+
+    // ── Vuln signature checker ───────────────────────────────────────
+    let check_response = |test_url: &str, payload: &str, findings: &mut Vec<serde_json::Value>| {
+        if let Ok(res) = client.get(test_url).send() {
+            let st = res.status().as_u16();
+            if let Ok(body) = res.text() {
+                let lb = body.to_lowercase();
+                let mut matched = false;
+
+                // SQLi
+                if lb.contains("sql syntax") || lb.contains("microsoft oledb") || lb.contains("ora-")
+                    || lb.contains("sqlite error") || lb.contains("unclosed quotation")
+                    || lb.contains("system.data.sqlclient") || lb.contains("sqlexception")
+                    || lb.contains("pg_query") || lb.contains("mysql_")
+                {
+                    findings.push(json!({"vulnerability": "SQL Injection", "severity": "Critical", "payload": payload, "url": test_url, "evidence": format!("DB error signature detected. Status: {}", st)}));
+                    matched = true;
+                }
+
+                // Command Injection
+                if lb.contains("uid=0(root)") || lb.contains("uid=33(www-data)")
+                    || lb.contains("windows ip configuration") || lb.contains("volume serial number")
+                {
+                    findings.push(json!({"vulnerability": "Command Injection", "severity": "Critical", "payload": payload, "url": test_url, "evidence": "OS command output in response."}));
+                    matched = true;
+                }
+
+                // XSS (Reflection)
+                if body.contains(payload) && (payload.contains("<script") || payload.contains("onerror=")
+                    || payload.contains("onload=") || payload.contains("<svg") || payload.contains("<img"))
+                {
+                    findings.push(json!({"vulnerability": "Reflected XSS", "severity": "High", "payload": payload, "url": test_url, "evidence": "Payload reflected unescaped in response."}));
+                    matched = true;
+                }
+
+                // SSRF
+                if (payload.contains("169.254.169.254") || payload.contains("metadata"))
+                    && (lb.contains("ami-id") || lb.contains("instance-action"))
+                {
+                    findings.push(json!({"vulnerability": "SSRF", "severity": "High", "payload": payload, "url": test_url, "evidence": "Cloud metadata exposed via SSRF."}));
+                    matched = true;
+                }
+
+                // LFI
+                if lb.contains("root:x:0:0:") || lb.contains("[fonts]") || lb.contains("[extensions]") {
+                    findings.push(json!({"vulnerability": "Local File Inclusion", "severity": "High", "payload": payload, "url": test_url, "evidence": "System file contents leaked."}));
+                    matched = true;
+                }
+
+                // SSTI
+                if (payload.contains("{{7*7}}") || payload.contains("${7*7}")) && lb.contains("49") {
+                    findings.push(json!({"vulnerability": "SSTI", "severity": "Critical", "payload": payload, "url": test_url, "evidence": "Template eval: 7*7=49 in response."}));
+                    matched = true;
+                }
+
+                // HTTP 500
+                if st == 500 && !matched {
+                    findings.push(json!({"vulnerability": "Unhandled Server Error", "severity": "Medium", "payload": payload, "url": test_url, "evidence": format!("HTTP 500 from payload: {}", payload)}));
+                }
+            }
+        }
+    };
+
+    // ── Phase 2A: Targeted mode — test AI-crafted URLs ───────────────
+    if let Some(ref urls) = test_urls {
+        for turl in urls {
+            check_response(turl, turl, &mut findings);
+        }
+    }
+
+    // ── Phase 2B: Auto-crawl mode — test discovered real parameters ──
+    if scan_lower != "targeted" {
+        for (endpoint_url, param_name) in &discovered_params {
+            for payload in &payloads {
+                let test_url = format!("{}?{}={}", endpoint_url, urlencoding::encode(param_name), urlencoding::encode(payload));
+                check_response(&test_url, payload, &mut findings);
+            }
+        }
+        // Also test the base URL if no params were discovered
+        if discovered_params.is_empty() {
+            for payload in &payloads {
+                let test_url = if url.contains('?') {
+                    format!("{}&q={}", url, urlencoding::encode(payload))
+                } else {
+                    format!("{}?q={}", url, urlencoding::encode(payload))
+                };
+                check_response(&test_url, payload, &mut findings);
+            }
+        }
+    }
+
+    // ── Persist findings ─────────────────────────────────────────────
+    let findings_path = std::path::PathBuf::from("helix-sec-findings.json");
+    let mut all_findings = Vec::new();
+    if findings_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&findings_path) {
+            if let Ok(existing) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
+                all_findings.extend(existing);
+            }
+        }
+    }
+    for finding in &findings {
+        let fs = finding.to_string();
+        if !all_findings.iter().any(|f| f.to_string() == fs) {
+            all_findings.push(finding.clone());
+        }
+    }
+    let _ = std::fs::write(&findings_path, serde_json::to_string_pretty(&all_findings).unwrap_or_else(|_| "[]".to_string()));
+
+    to_pretty_json(json!({
+        "target": url,
+        "scan_type": scan_type,
+        "baseline_status": status,
+        "headers": headers,
+        "discovered_endpoints": discovered_endpoints.len(),
+        "discovered_parameters": discovered_params.iter().map(|(ep, p)| format!("{} -> {}", ep, p)).collect::<Vec<_>>(),
+        "payloads_tested": payloads.len(),
+        "findings_count": findings.len(),
+        "findings": findings
+    }))
+}
+
+
+
+
+fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
+    let mut findings_val: serde_json::Value = serde_json::from_str(&input.findings_json).unwrap_or_else(|_| json!({}));
+
+    if input.findings_json == "AUTO" || input.findings_json.is_empty() {
+        let findings_path = std::path::PathBuf::from("helix-sec-findings.json");
+        if findings_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&findings_path) {
+                if let Ok(existing) = serde_json::from_str::<serde_json::Value>(&content) {
+                    findings_val = existing;
+                }
+            }
+        }
+    }
+
+    let mut html = String::from(r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HELIX-SEC Vulnerability Report</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --surface-color: #161b22;
+            --border-color: #30363d;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+            --accent-color: #58a6ff;
+            --critical-color: #ff7b72;
+            --high-color: #d2a8ff;
+            --medium-color: #f0883e;
+            --low-color: #79c0ff;
+            --info-color: #56d364;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 2rem;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 2rem;
+            margin-bottom: 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 800;
+            margin: 0;
+            background: linear-gradient(90deg, #ff7b72, #d2a8ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .target-url {
+            font-family: 'JetBrains Mono', monospace;
+            background-color: rgba(88, 166, 255, 0.1);
+            color: var(--accent-color);
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            border: 1px solid rgba(88, 166, 255, 0.2);
+            font-size: 1.1rem;
+        }
+
+        .finding-card {
+            background-color: var(--surface-color);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .finding-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+            border-color: #484f58;
+        }
+
+        .finding-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1rem;
+        }
+
+        .finding-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin: 0;
+            color: #fff;
+        }
+
+        .badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .badge.critical { background: rgba(255, 123, 114, 0.1); color: var(--critical-color); border: 1px solid rgba(255,123,114,0.2); }
+        .badge.high { background: rgba(210, 168, 255, 0.1); color: var(--high-color); border: 1px solid rgba(210,168,255,0.2); }
+        .badge.medium { background: rgba(240, 136, 62, 0.1); color: var(--medium-color); border: 1px solid rgba(240,136,62,0.2); }
+        .badge.low { background: rgba(121, 192, 255, 0.1); color: var(--low-color); border: 1px solid rgba(121,192,255,0.2); }
+        .badge.informational, .badge.info { background: rgba(86, 211, 100, 0.1); color: var(--info-color); border: 1px solid rgba(86,211,100,0.2); }
+
+        .meta-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+            background: #0d1117;
+            padding: 1rem;
+            border-radius: 6px;
+        }
+
+        .meta-item {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .meta-label {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            margin-bottom: 0.25rem;
+        }
+
+        .meta-value {
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .section-title {
+            font-size: 1.1rem;
+            color: #fff;
+            margin-top: 1.5rem;
+            margin-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.25rem;
+        }
+
+        p {
+            margin-top: 0;
+            color: var(--text-primary);
+        }
+
+        pre {
+            background-color: #0d1117;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 1rem;
+            overflow-x: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: #e6edf3;
+        }
+
+        .evidence-toggle {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--accent-color);
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: 'Inter', sans-serif;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: all 0.2s;
+        }
+
+        .evidence-toggle:hover {
+            background: rgba(88, 166, 255, 0.1);
+            border-color: var(--accent-color);
+        }
+
+        .evidence-content {
+            display: none;
+            margin-top: 1rem;
+        }
+
+        .evidence-content.open {
+            display: block;
+            animation: slideDown 0.3s ease-out;
+        }
+
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .raw-json {
+            margin-top: 3rem;
+            border-top: 2px dashed var(--border-color);
+            padding-top: 2rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>HELIX-SEC Report</h1>
+                <p style="color: var(--text-secondary); margin-top: 0.5rem;">Autonomous Web Vulnerability Assessment</p>
+            </div>
+            <div class="target-url">"#);
+            
+    html.push_str(&input.target);
+    html.push_str(r#"</div>
+        </div>
+
+        <div id="findings-container">
+"#);
+
+    let mut parsed_successfully = false;
+    
+    // Try to extract the findings array
+    let findings_array = if findings_val.is_array() {
+        findings_val.as_array()
+    } else if findings_val.is_object() {
+        findings_val.get("findings").and_then(|f| f.as_array())
+    } else {
+        None
+    };
+
+    if let Some(findings) = findings_array {
+        if !findings.is_empty() {
+            parsed_successfully = true;
+            for (idx, finding) in findings.iter().enumerate() {
+                let title = finding.get("title")
+                    .or_else(|| finding.get("vulnerability"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown Vulnerability");
+                let severity = finding.get("severity").and_then(|v| v.as_str()).unwrap_or("High");
+                let cvss = finding.get("cvss").and_then(|v| v.as_str()).unwrap_or("N/A");
+                let cwe = finding.get("cwe").and_then(|v| v.as_str()).unwrap_or("N/A");
+                let desc = finding.get("description").and_then(|v| v.as_str()).unwrap_or("Automated scanner finding.");
+                let impact = finding.get("impact").and_then(|v| v.as_str()).unwrap_or("See finding details.");
+                let remediation = finding.get("remediation").and_then(|v| v.as_str()).unwrap_or("Review the evidence and apply security patches.");
+                let evidence = finding.get("evidence").and_then(|v| v.as_str()).unwrap_or("");
+
+                let sev_lower = severity.to_lowercase();
+                
+                html.push_str(&format!(r#"
+            <div class="finding-card">
+                <div class="finding-header">
+                    <h2 class="finding-title">{}</h2>
+                    <span class="badge {}">{}</span>
+                </div>
+                
+                <div class="meta-grid">
+                    <div class="meta-item">
+                        <span class="meta-label">CVSS Score</span>
+                        <span class="meta-value">{}</span>
+                    </div>
+                    <div class="meta-item">
+                        <span class="meta-label">CWE</span>
+                        <span class="meta-value">{}</span>
+                    </div>
+                </div>
+
+                <div class="section-title">Description</div>
+                <p>{}</p>
+
+                <div class="section-title">Impact</div>
+                <p>{}</p>
+
+                <div class="section-title">Remediation</div>
+                <p>{}</p>
+"#, title, sev_lower, severity, cvss, cwe, desc, impact, remediation));
+
+                if !evidence.is_empty() {
+                    html.push_str(&format!(r#"
+                <div style="margin-top: 1.5rem;">
+                    <button class="evidence-toggle" onclick="document.getElementById('evidence-{}').classList.toggle('open')">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                        Toggle Evidence Log
+                    </button>
+                    <div id="evidence-{}" class="evidence-content">
+                        <pre><code>{}</code></pre>
+                    </div>
+                </div>
+"#, idx, idx, evidence.replace("<", "&lt;").replace(">", "&gt;")));
+                }
+
+                html.push_str("            </div>\n");
+            }
+        }
+    }
+
+    if !parsed_successfully {
+        html.push_str(r#"
+            <div class="finding-card">
+                <h2 class="finding-title" style="margin-bottom: 1rem;">Raw Assessment Data</h2>
+                <p style="color: var(--text-secondary);">The findings were returned in an unstructured format. Raw data is displayed below.</p>
+            </div>
+        "#);
+    }
+
+    html.push_str(r#"        </div>"#);
+    
+    // Always attach the raw JSON at the bottom for debugging or alternative tooling
+    html.push_str(r#"
+        <div class="raw-json">
+            <h3 style="color: var(--text-secondary); font-size: 0.9rem; text-transform: uppercase;">Raw Output Log</h3>
+            <pre style="max-height: 400px; overflow-y: auto;"><code>"#);
+    
+    // Try to pretty print the raw JSON string
+    if let Ok(pretty) = serde_json::to_string_pretty(&findings_val) {
+        html.push_str(&pretty.replace("<", "&lt;").replace(">", "&gt;"));
+    } else {
+        html.push_str(&input.findings_json.replace("<", "&lt;").replace(">", "&gt;"));
+    }
+            
+    html.push_str(r#"</code></pre>
+        </div>
+    </div>
+</body>
+</html>"#);
+    
+    std::fs::write(&input.output_path, html).map_err(|e| e.to_string())?;
+    
+    to_pretty_json(json!({
+        "status": "success",
+        "report_path": input.output_path,
+        "target": input.target
     }))
 }
 
@@ -1923,6 +2655,38 @@ fn run_bash(input: BashCommandInput) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+pub fn deserialize_optional_bool_from_string<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match v {
+        Some(serde_json::Value::Bool(b)) => Ok(Some(b)),
+        Some(serde_json::Value::String(s)) => {
+            if s.eq_ignore_ascii_case("true") {
+                Ok(Some(true))
+            } else if s.eq_ignore_ascii_case("false") {
+                Ok(Some(false))
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+pub fn deserialize_optional_number_from_string<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match v {
+        Some(serde_json::Value::Number(n)) => Ok(n.as_u64()),
+        Some(serde_json::Value::String(s)) => Ok(s.parse::<u64>().ok()),
+        _ => Ok(None),
+    }
+}
+
 fn workspace_test_branch_preflight(command: &str) -> Option<BashCommandOutput> {
     if !is_workspace_test_command(command) {
         return None;
@@ -2308,6 +3072,7 @@ enum TodoStatus {
 
 #[derive(Debug, Deserialize)]
 struct SkillInput {
+    #[serde(alias = "skill_name")]
     skill: String,
     args: Option<String>,
 }
@@ -2407,8 +3172,10 @@ struct ReplInput {
 #[derive(Debug, Deserialize)]
 struct PowerShellInput {
     command: String,
+    #[serde(default, deserialize_with = "deserialize_optional_number_from_string")]
     timeout: Option<u64>,
     description: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_bool_from_string")]
     run_in_background: Option<bool>,
 }
 
@@ -2417,6 +3184,27 @@ struct AskUserQuestionInput {
     question: String,
     #[serde(default)]
     options: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WebSecScanInput {
+    Wrapped { input: String },
+    Direct {
+        url: String,
+        scan_type: String,
+        #[serde(default)]
+        payloads: Option<serde_json::Value>,
+        #[serde(default)]
+        test_urls: Option<Vec<String>>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct VulnReportInput {
+    findings_json: String,
+    target: String,
+    output_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2583,6 +3371,8 @@ struct TodoWriteOutput {
 
 #[derive(Debug, Serialize)]
 struct SkillOutput {
+    #[serde(rename = "SYSTEM_INSTRUCTION")]
+    system_instruction: String,
     skill: String,
     path: String,
     args: Option<String>,
@@ -3190,6 +3980,7 @@ fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
     let description = parse_skill_description(&prompt);
 
     Ok(SkillOutput {
+        system_instruction: "CRITICAL INSTRUCTION: You have successfully loaded this skill. You MUST NOT call the `Skill` tool for this exact skill again. Read the skill's instructions in the 'prompt' field and immediately execute the next step in its methodology.".to_string(),
         skill: input.skill,
         path: skill_path.display().to_string(),
         args: input.args,

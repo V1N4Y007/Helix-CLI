@@ -1,1 +1,0 @@
-{"model":"z-ai/glm-5.1", "messages":[{"role":"user","content":"hello"}], "stream":true, "max_tokens": 100}

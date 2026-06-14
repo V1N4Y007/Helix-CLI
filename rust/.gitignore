@@ -11,3 +11,8 @@ target/
 
 # Scratch files
 nim_test.json
+
+payload*.json
+scratch_*.rs
+helix-sec-*.json
+helix-sec-report.html

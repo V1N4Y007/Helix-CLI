@@ -4621,12 +4621,22 @@ impl LiveCli {
                      {{\"url\": \"{url}\", \"scan_type\": \"full\", \"payloads\": [\"' OR 1=1--\", \"<script>alert(1)</script>\"]}}. \
                      The tool will automatically inject a comprehensive payload suite and analyze \
                      security headers. Wait for the results. \
-                     \n\nSTEP 2 (MANDATORY — DO THIS AFTER STEP 1 COMPLETES): Call the 'VulnReport' tool with: \
+                     \n\nSTEP 2 (MANDATORY — VALIDATION GATE): Once Step 1 completes, act as a Validator Agent. \
+                     Aggressively challenge EVERY finding from WebSecScan using the 7-Question Gate Strategy: \
+                     1. Reproducibility: Can the finding be consistently reproduced? \
+                     2. Context: Does the payload execute in the intended context? \
+                     3. Veracity: Is it a true positive, or just a reflection/WAF block page? \
+                     4. Accuracy: Are the security impact and risk ratings accurate? \
+                     5. Uniqueness: Is the finding a duplicate or part of another finding? \
+                     6. Boundary: Does it cross a privilege boundary? \
+                     7. Remediation: Is there a clear, actionable remediation? \
+                     Discard any findings that fail this gate. Only proceed with high-fidelity, validated findings. \
+                     \n\nSTEP 3 (MANDATORY — DO THIS AFTER STEP 2): Call the 'VulnReport' tool with: \
                      {{\"findings_json\": \"AUTO\", \"target\": \"{url}\", \"output_path\": \"helix-sec-report.html\"}}. \
-                     \n\nSTEP 3: Present a summary of findings to the operator. \
+                     \n\nSTEP 4: Present a summary of the validated findings to the operator. \
                      \n\nRULES: \
                      - Do NOT call the Skill tool. The methodology is embedded in this prompt. \
-                     - Do NOT skip Step 1. You MUST call WebSecScan before VulnReport. \
+                     - Do NOT skip any steps. You MUST perform the Validation Gate before calling VulnReport. \
                      - Do NOT call WebSecScan more than once unless asked. The built-in suite is comprehensive. \
                      - Do NOT hallucinate tool names. Only use: WebSecScan, VulnReport, write_file."
                 );

@@ -4631,9 +4631,9 @@ impl LiveCli {
                      6. Boundary: Does it cross a privilege boundary? \
                      7. Remediation: Is there a clear, actionable remediation? \
                      Discard any findings that fail this gate. Only proceed with high-fidelity, validated findings. \
-                     \n\nSTEP 3 (MANDATORY — DO THIS AFTER STEP 2): Call the 'VulnReport' tool with: \
-                     {{\"findings_json\": \"AUTO\", \"target\": \"{url}\", \"output_path\": \"helix-sec-report.html\"}}. \
-                     \n\nSTEP 4: Present a summary of the validated findings to the operator. \
+                     \n\nSTEP 3 (MANDATORY — DO THIS AFTER STEP 2): Use the 'write_file' tool to overwrite 'helix-sec-findings.json' with your finalized, deduplicated, and validated JSON array. Ensure each finding in the array includes: 'title', 'severity', 'cvss', 'cwe', 'description', 'impact', 'remediation', 'evidence', and 'url'. \
+                     \n\nSTEP 4: Call the 'VulnReport' tool with: {{\"findings_json\": \"AUTO\", \"target\": \"{url}\", \"output_path\": \"helix-sec-report.html\"}}. \
+                     \n\nSTEP 5: Present a summary of the validated findings to the operator. \
                      \n\nRULES: \
                      - Do NOT call the Skill tool. The methodology is embedded in this prompt. \
                      - Do NOT skip any steps. You MUST perform the Validation Gate before calling VulnReport. \

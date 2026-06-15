@@ -251,7 +251,7 @@ impl GlobalToolRegistry {
                 if allowed_tools.is_none() {
                     matches!(
                         spec.name,
-                        "bash" | "read_file" | "write_file" | "edit_file" | "glob_search" | "grep_search" | "WebFetch" | "WebSearch" | "REPL" | "PowerShell"
+                        "bash" | "read_file" | "write_file" | "edit_file" | "glob_search" | "grep_search" | "WebFetch" | "WebSearch" | "REPL" | "PowerShell" | "WebSecScan" | "VulnReport"
                     )
                 } else {
                     true
@@ -1789,26 +1789,42 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>HELIX-SEC Vulnerability Report</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-color: #0d1117;
-            --surface-color: #161b22;
-            --border-color: #30363d;
-            --text-primary: #c9d1d9;
-            --text-secondary: #8b949e;
-            --accent-color: #58a6ff;
-            --critical-color: #ff7b72;
-            --high-color: #d2a8ff;
-            --medium-color: #f0883e;
-            --low-color: #79c0ff;
-            --info-color: #56d364;
+            --bg-main: #050505;
+            --bg-panel: rgba(10, 15, 20, 0.7);
+            --border-glow: rgba(0, 243, 255, 0.2);
+            --text-main: #e0e0e0;
+            --text-muted: #8892b0;
+            --accent-cyan: #00f3ff;
+            --accent-neon: #39ff14;
+            --critical: #ff003c;
+            --critical-bg: rgba(255, 0, 60, 0.1);
+            --high: #ff5e00;
+            --high-bg: rgba(255, 94, 0, 0.1);
+            --medium: #ffb000;
+            --medium-bg: rgba(255, 176, 0, 0.1);
+            --low: #00f3ff;
+            --low-bg: rgba(0, 243, 255, 0.1);
+            --info: #39ff14;
+            --info-bg: rgba(57, 255, 20, 0.1);
+        }
+
+        * {
+            box-sizing: border-box;
         }
 
         body {
-            background-color: var(--bg-color);
-            color: var(--text-primary);
-            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-main);
+            background-image: 
+                radial-gradient(circle at 50% 0%, rgba(0, 243, 255, 0.05) 0%, transparent 50%),
+                linear-gradient(rgba(0, 243, 255, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 243, 255, 0.03) 1px, transparent 1px);
+            background-size: 100% 100%, 30px 30px, 30px 30px;
+            background-attachment: fixed;
+            color: var(--text-main);
+            font-family: 'Rajdhani', sans-serif;
             margin: 0;
             padding: 2rem;
             line-height: 1.6;
@@ -1817,88 +1833,158 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
         .container {
             max-width: 1200px;
             margin: 0 auto;
+            position: relative;
         }
 
         .header {
-            border-bottom: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--border-glow);
             padding-bottom: 2rem;
-            margin-bottom: 2rem;
+            margin-bottom: 3rem;
             display: flex;
             align-items: center;
             justify-content: space-between;
+            position: relative;
+        }
+        
+        .header::after {
+            content: '';
+            position: absolute;
+            bottom: -1px;
+            left: 0;
+            width: 100px;
+            height: 2px;
+            background: var(--accent-cyan);
+            box-shadow: 0 0 10px var(--accent-cyan);
         }
 
         h1 {
-            font-size: 2.5rem;
-            font-weight: 800;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 3rem;
+            font-weight: 900;
             margin: 0;
-            background: linear-gradient(90deg, #ff7b72, #d2a8ff);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            background: linear-gradient(90deg, #fff, var(--accent-cyan));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+            text-shadow: 0 0 20px rgba(0, 243, 255, 0.3);
+            animation: pulse 4s infinite alternate;
+        }
+
+        @keyframes pulse {
+            0% { text-shadow: 0 0 20px rgba(0, 243, 255, 0.2); }
+            100% { text-shadow: 0 0 30px rgba(0, 243, 255, 0.6); }
         }
 
         .target-url {
-            font-family: 'JetBrains Mono', monospace;
-            background-color: rgba(88, 166, 255, 0.1);
-            color: var(--accent-color);
-            padding: 0.5rem 1rem;
-            border-radius: 6px;
-            border: 1px solid rgba(88, 166, 255, 0.2);
-            font-size: 1.1rem;
+            font-family: 'Fira Code', monospace;
+            background: rgba(0, 243, 255, 0.05);
+            color: var(--accent-cyan);
+            padding: 0.75rem 1.5rem;
+            border-radius: 4px;
+            border: 1px solid var(--border-glow);
+            font-size: 1.2rem;
+            box-shadow: inset 0 0 10px rgba(0, 243, 255, 0.05);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .target-url::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(0, 243, 255, 0.2), transparent);
+            animation: scanline 3s infinite linear;
+        }
+
+        @keyframes scanline {
+            100% { left: 100%; }
         }
 
         .finding-card {
-            background-color: var(--surface-color);
-            border: 1px solid var(--border-color);
+            background-color: var(--bg-panel);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--border-glow);
+            border-left: 4px solid var(--accent-cyan);
             border-radius: 8px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-            transition: transform 0.2s, box-shadow 0.2s;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+            position: relative;
+            overflow: hidden;
+            animation: fadeInUp 0.6s ease-out backwards;
         }
 
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .finding-card:nth-child(1) { animation-delay: 0.1s; }
+        .finding-card:nth-child(2) { animation-delay: 0.2s; }
+        .finding-card:nth-child(3) { animation-delay: 0.3s; }
+        .finding-card:nth-child(4) { animation-delay: 0.4s; }
+        .finding-card:nth-child(5) { animation-delay: 0.5s; }
+
         .finding-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 24px rgba(0,0,0,0.2);
-            border-color: #484f58;
+            transform: translateY(-5px) scale(1.01);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 0 20px rgba(0, 243, 255, 0.1);
+            border-color: rgba(0, 243, 255, 0.5);
         }
 
         .finding-header {
             display: flex;
             justify-content: space-between;
             align-items: flex-start;
-            margin-bottom: 1rem;
+            margin-bottom: 1.5rem;
         }
 
         .finding-title {
-            font-size: 1.5rem;
-            font-weight: 600;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.8rem;
+            font-weight: 700;
             margin: 0;
             color: #fff;
+            letter-spacing: 1px;
         }
 
         .badge {
-            padding: 0.25rem 0.75rem;
-            border-radius: 20px;
-            font-size: 0.85rem;
-            font-weight: 600;
+            font-family: 'Orbitron', sans-serif;
+            padding: 0.4rem 1rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 1px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.5);
+            position: relative;
+            overflow: hidden;
         }
+        
+        .finding-card.critical { border-left-color: var(--critical); }
+        .finding-card.high { border-left-color: var(--high); }
+        .finding-card.medium { border-left-color: var(--medium); }
+        .finding-card.low { border-left-color: var(--low); }
+        .finding-card.info { border-left-color: var(--info); }
 
-        .badge.critical { background: rgba(255, 123, 114, 0.1); color: var(--critical-color); border: 1px solid rgba(255,123,114,0.2); }
-        .badge.high { background: rgba(210, 168, 255, 0.1); color: var(--high-color); border: 1px solid rgba(210,168,255,0.2); }
-        .badge.medium { background: rgba(240, 136, 62, 0.1); color: var(--medium-color); border: 1px solid rgba(240,136,62,0.2); }
-        .badge.low { background: rgba(121, 192, 255, 0.1); color: var(--low-color); border: 1px solid rgba(121,192,255,0.2); }
-        .badge.informational, .badge.info { background: rgba(86, 211, 100, 0.1); color: var(--info-color); border: 1px solid rgba(86,211,100,0.2); }
+        .badge.critical { background: var(--critical-bg); color: var(--critical); border: 1px solid var(--critical); box-shadow: 0 0 10px var(--critical-bg); }
+        .badge.high { background: var(--high-bg); color: var(--high); border: 1px solid var(--high); box-shadow: 0 0 10px var(--high-bg); }
+        .badge.medium { background: var(--medium-bg); color: var(--medium); border: 1px solid var(--medium); box-shadow: 0 0 10px var(--medium-bg); }
+        .badge.low { background: var(--low-bg); color: var(--low); border: 1px solid var(--low); box-shadow: 0 0 10px var(--low-bg); }
+        .badge.informational, .badge.info { background: var(--info-bg); color: var(--info); border: 1px solid var(--info); box-shadow: 0 0 10px var(--info-bg); }
 
         .meta-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-            margin-bottom: 1.5rem;
-            background: #0d1117;
-            padding: 1rem;
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1.5rem;
             border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
         }
 
         .meta-item {
@@ -1907,70 +1993,103 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
         }
 
         .meta-label {
-            font-size: 0.8rem;
-            color: var(--text-secondary);
+            font-size: 0.85rem;
+            color: var(--text-muted);
             text-transform: uppercase;
-            margin-bottom: 0.25rem;
+            letter-spacing: 1px;
+            margin-bottom: 0.5rem;
+            font-family: 'Orbitron', sans-serif;
         }
 
         .meta-value {
+            font-size: 1.2rem;
             font-weight: 600;
-            font-family: 'JetBrains Mono', monospace;
+            font-family: 'Fira Code', monospace;
+            color: var(--accent-cyan);
         }
 
         .section-title {
-            font-size: 1.1rem;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.2rem;
             color: #fff;
-            margin-top: 1.5rem;
-            margin-bottom: 0.5rem;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 0.25rem;
+            margin-top: 2rem;
+            margin-bottom: 0.75rem;
+            display: flex;
+            align-items: center;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .section-title::before {
+            content: '>';
+            color: var(--accent-cyan);
+            margin-right: 0.5rem;
+            font-family: 'Fira Code', monospace;
         }
 
         p {
             margin-top: 0;
-            color: var(--text-primary);
+            color: var(--text-main);
+            font-size: 1.1rem;
+            line-height: 1.7;
         }
 
         pre {
-            background-color: #0d1117;
-            border: 1px solid var(--border-color);
+            background-color: #030303;
+            border: 1px solid var(--border-glow);
             border-radius: 6px;
-            padding: 1rem;
+            padding: 1.5rem;
             overflow-x: auto;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.9rem;
-            color: #e6edf3;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.95rem;
+            color: var(--accent-cyan);
+            box-shadow: inset 0 0 20px rgba(0,0,0,0.8);
+        }
+        
+        pre::-webkit-scrollbar {
+            height: 8px;
+        }
+        pre::-webkit-scrollbar-track {
+            background: rgba(0,0,0,0.3);
+        }
+        pre::-webkit-scrollbar-thumb {
+            background: var(--accent-cyan);
+            border-radius: 4px;
         }
 
         .evidence-toggle {
-            background: transparent;
-            border: 1px solid var(--border-color);
-            color: var(--accent-color);
-            padding: 0.5rem 1rem;
-            border-radius: 6px;
+            background: rgba(0, 243, 255, 0.05);
+            border: 1px solid var(--accent-cyan);
+            color: var(--accent-cyan);
+            padding: 0.75rem 1.5rem;
+            border-radius: 4px;
             cursor: pointer;
-            font-family: 'Inter', sans-serif;
-            font-weight: 600;
+            font-family: 'Orbitron', sans-serif;
+            font-weight: 700;
+            font-size: 1rem;
             display: inline-flex;
             align-items: center;
-            gap: 0.5rem;
+            gap: 0.75rem;
             transition: all 0.2s;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            box-shadow: 0 0 10px rgba(0, 243, 255, 0.1);
         }
 
         .evidence-toggle:hover {
-            background: rgba(88, 166, 255, 0.1);
-            border-color: var(--accent-color);
+            background: var(--accent-cyan);
+            color: #000;
+            box-shadow: 0 0 20px rgba(0, 243, 255, 0.4);
         }
 
         .evidence-content {
             display: none;
-            margin-top: 1rem;
+            margin-top: 1.5rem;
         }
 
         .evidence-content.open {
             display: block;
-            animation: slideDown 0.3s ease-out;
+            animation: slideDown 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
         }
 
         @keyframes slideDown {
@@ -1979,9 +2098,22 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
         }
 
         .raw-json {
-            margin-top: 3rem;
-            border-top: 2px dashed var(--border-color);
-            padding-top: 2rem;
+            margin-top: 4rem;
+            border-top: 1px solid var(--border-glow);
+            padding-top: 3rem;
+            position: relative;
+        }
+        
+        .raw-json::before {
+            content: 'SYSTEM LOG // RAW DUMP';
+            position: absolute;
+            top: -12px;
+            left: 20px;
+            background: var(--bg-main);
+            padding: 0 10px;
+            font-family: 'Fira Code', monospace;
+            color: var(--text-muted);
+            font-size: 0.85rem;
         }
     </style>
 </head>
@@ -1990,7 +2122,7 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
         <div class="header">
             <div>
                 <h1>HELIX-SEC Report</h1>
-                <p style="color: var(--text-secondary); margin-top: 0.5rem;">Autonomous Web Vulnerability Assessment</p>
+                <p style="color: var(--accent-cyan); margin-top: 0.5rem; font-family: 'Fira Code', monospace; letter-spacing: 1px;">> AUTONOMOUS WEB VULNERABILITY ASSESSMENT // COMPLETED</p>
             </div>
             <div class="target-url">"#);
             
@@ -2031,7 +2163,7 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
                 let sev_lower = severity.to_lowercase();
                 
                 html.push_str(&format!(r#"
-            <div class="finding-card">
+            <div class="finding-card {}">
                 <div class="finding-header">
                     <h2 class="finding-title">{}</h2>
                     <span class="badge {}">{}</span>
@@ -2056,14 +2188,14 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
 
                 <div class="section-title">Remediation</div>
                 <p>{}</p>
-"#, title, sev_lower, severity, cvss, cwe, desc, impact, remediation));
+"#, sev_lower, title, sev_lower, severity, cvss, cwe, desc, impact, remediation));
 
                 if !evidence.is_empty() {
                     html.push_str(&format!(r#"
-                <div style="margin-top: 1.5rem;">
+                <div style="margin-top: 2rem;">
                     <button class="evidence-toggle" onclick="document.getElementById('evidence-{}').classList.toggle('open')">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-                        Toggle Evidence Log
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                        VIEW EVIDENCE LOG
                     </button>
                     <div id="evidence-{}" class="evidence-content">
                         <pre><code>{}</code></pre>
@@ -2080,8 +2212,8 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
     if !parsed_successfully {
         html.push_str(r#"
             <div class="finding-card">
-                <h2 class="finding-title" style="margin-bottom: 1rem;">Raw Assessment Data</h2>
-                <p style="color: var(--text-secondary);">The findings were returned in an unstructured format. Raw data is displayed below.</p>
+                <h2 class="finding-title" style="margin-bottom: 1rem; color: var(--accent-cyan);">Raw Assessment Data</h2>
+                <p style="color: var(--text-muted);">The findings were returned in an unstructured format. Raw data is displayed below.</p>
             </div>
         "#);
     }
@@ -2091,7 +2223,6 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
     // Always attach the raw JSON at the bottom for debugging or alternative tooling
     html.push_str(r#"
         <div class="raw-json">
-            <h3 style="color: var(--text-secondary); font-size: 0.9rem; text-transform: uppercase;">Raw Output Log</h3>
             <pre style="max-height: 400px; overflow-y: auto;"><code>"#);
     
     // Try to pretty print the raw JSON string

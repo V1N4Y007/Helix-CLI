@@ -1789,9 +1789,46 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                     matched = true;
                 }
 
-                // HTTP 500
+                // HTTP 500 — classify by payload type for accuracy
                 if st == 500 && !matched {
-                    findings.push(json!({"vulnerability": "Unhandled Server Error", "severity": "Medium", "payload": payload, "url": test_url, "evidence": format!("HTTP 500 from payload: {}", payload)}));
+                    let is_sqli_payload = payload.contains("OR 1=1") || payload.contains("OR 1=2")
+                        || payload.contains("UNION SELECT") || payload.contains("' --")
+                        || payload.contains("'--") || payload.contains("admin'")
+                        || payload.contains("' OR") || payload.contains("\" OR");
+                    let is_cmdi_payload = payload.contains("; ls") || payload.contains("| cat")
+                        || payload.contains("$(id)") || payload.contains("| id");
+                    if is_sqli_payload {
+                        // Server crashed on a SQL-specific payload — strong indicator of
+                        // error-based or blind SQL injection. Classify as Critical.
+                        findings.push(json!({
+                            "vulnerability": "SQL Injection (Error-Based / Blind)",
+                            "severity": "Critical",
+                            "payload": payload,
+                            "url": test_url,
+                            "evidence": format!(
+                                "HTTP 500 triggered by SQL payload '{}'. The server crashed when the quote \
+                                 was injected, indicating the input is concatenated directly into a SQL query \
+                                 without parameterization. This is a strong indicator of error-based or blind SQLi.",
+                                payload
+                            )
+                        }));
+                    } else if is_cmdi_payload {
+                        findings.push(json!({
+                            "vulnerability": "Possible Command Injection",
+                            "severity": "High",
+                            "payload": payload,
+                            "url": test_url,
+                            "evidence": format!("HTTP 500 triggered by command injection payload: {}", payload)
+                        }));
+                    } else {
+                        findings.push(json!({
+                            "vulnerability": "Unhandled Server Error",
+                            "severity": "Medium",
+                            "payload": payload,
+                            "url": test_url,
+                            "evidence": format!("HTTP 500 from payload: {}", payload)
+                        }));
+                    }
                 }
             }
         }

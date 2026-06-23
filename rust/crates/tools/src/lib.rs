@@ -1479,103 +1479,156 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
     let body = res.text().unwrap_or_default();
 
 
-    // ── Phase 1: Endpoint Discovery (Crawling) ──────────────────────
+    // ── Phase 1: Multi-level Endpoint Discovery ──────────────────────
     let parsed_base = url::Url::parse(&url).unwrap_or_else(|_| url::Url::parse("http://localhost").unwrap());
     let base_url = format!("{}://{}", parsed_base.scheme(), parsed_base.host_str().unwrap_or("localhost"));
     let target_host = parsed_base.host_str().unwrap_or("").to_string();
 
     let mut discovered_endpoints: Vec<serde_json::Value> = Vec::new();
-    // (full_endpoint_url, param_name)
-    let mut discovered_params: Vec<(String, String)> = Vec::new();
+    // (endpoint_base_url, param_name, method)  method = "GET" or "POST"
+    let mut discovered_params: Vec<(String, String, String)> = Vec::new();
     let mut seen_params: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Track pages already crawled to avoid loops
+    let mut crawled_pages: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Queue of page URLs to crawl (depth 0 = homepage, depth 1 = linked pages)
+    let mut crawl_queue: Vec<(String, u8)> = vec![(url.clone(), 0)];
 
-    // Extract href attributes
-    let href_re = regex::Regex::new(r#"href\s*=\s*["']([^"'#]+)["']"#).unwrap();
-    for cap in href_re.captures_iter(&body) {
-        let href = cap[1].trim();
-        if href.is_empty() || href.starts_with("javascript:") || href.starts_with("mailto:") {
-            continue;
+    // Helper closures for extracting links and forms from HTML
+    let href_re     = regex::Regex::new(r#"href\s*=\s*["']([^"'#]+)["']"#).unwrap();
+    let form_re     = regex::Regex::new(r#"(?is)<form[^>]*>(.*?)</form>"#).unwrap();
+    let action_re   = regex::Regex::new(r#"(?i)action\s*=\s*["']([^"']*)["']"#).unwrap();
+    let method_re   = regex::Regex::new(r#"(?i)method\s*=\s*["']([^"']+)["']"#).unwrap();
+    let input_re    = regex::Regex::new(r#"(?i)<input[^>]*name\s*=\s*["']([^"']+)["'][^>]*>"#).unwrap();
+    let select_re   = regex::Regex::new(r#"(?i)<select[^>]*name\s*=\s*["']([^"']+)["'][^>]*>"#).unwrap();
+    let textarea_re = regex::Regex::new(r#"(?i)<textarea[^>]*name\s*=\s*["']([^"']+)["'][^>]*>"#).unwrap();
+
+    // Common vulnerable paths to probe even if not linked from homepage
+    let common_paths = [
+        "/search.aspx", "/Search.aspx", "/search.php", "/search",
+        "/login.aspx", "/Login.aspx", "/login.php", "/login",
+        "/register.aspx", "/Register.aspx", "/signup.aspx",
+        "/artists.aspx", "/artist.aspx", "/art.aspx",
+        "/user.aspx", "/profile.aspx", "/account.aspx",
+        "/product.aspx", "/products.aspx", "/item.aspx",
+        "/category.aspx", "/categories.aspx",
+        "/comments.aspx", "/comment.aspx",
+        "/news.aspx", "/article.aspx", "/blog.aspx",
+        "/admin", "/admin.aspx", "/admin.php",
+        "/search?q=test", "/search?query=test", "/search?s=test",
+        "/index.php?id=1", "/index.aspx?id=1",
+    ];
+    for path in &common_paths {
+        let probe_url = format!("{}{}", base_url, path);
+        if crawled_pages.insert(probe_url.clone()) {
+            crawl_queue.push((probe_url, 1)); // treat as depth-1 so we don't recurse further
         }
-        let full_url = if href.starts_with("http") {
-            href.to_string()
-        } else if href.starts_with('/') {
-            format!("{}{}", base_url, href)
+    }
+
+    // Bodies already fetched: homepage is already in `body`
+    let mut page_bodies: Vec<(String, String)> = vec![(url.clone(), body.clone())];
+
+    // Crawl up to depth 1, max 30 unique pages
+    let max_pages = 30usize;
+    let mut qi = 0;
+    while qi < crawl_queue.len() && crawled_pages.len() <= max_pages {
+        let (page_url, depth) = crawl_queue[qi].clone();
+        qi += 1;
+
+        // Fetch page if we don't have the body yet
+        let page_body = if page_url == url {
+            body.clone()
         } else {
-            format!("{}/{}", url.trim_end_matches('/'), href)
+            match client.get(&page_url).send().and_then(|r| r.text()) {
+                Ok(b) => { page_bodies.push((page_url.clone(), b.clone())); b }
+                Err(_) => continue,
+            }
         };
-        // Only keep same-origin links
-        if !full_url.contains(&target_host) { continue; }
-        if let Ok(parsed_url) = url::Url::parse(&full_url) {
-            let params: Vec<(String, String)> = parsed_url.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-            if !params.is_empty() {
-                let base_path = format!("{}://{}{}", parsed_url.scheme(), parsed_url.host_str().unwrap_or(""), parsed_url.path());
-                for (k, _) in &params {
-                    let key = format!("{}?{}", base_path, k);
-                    if seen_params.insert(key) {
-                        discovered_params.push((base_path.clone(), k.clone()));
-                    }
-                }
-                discovered_endpoints.push(json!({
-                    "type": "link",
-                    "url": full_url,
-                    "path": parsed_url.path(),
-                    "parameters": params.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>()
-                }));
+        crawled_pages.insert(page_url.clone());
+
+        // --- Extract href links ---
+        for cap in href_re.captures_iter(&page_body) {
+            let href = cap[1].trim();
+            if href.is_empty() || href.starts_with("javascript:") || href.starts_with("mailto:") {
+                continue;
+            }
+            let full_link = if href.starts_with("http") {
+                href.to_string()
+            } else if href.starts_with('/') {
+                format!("{}{}", base_url, href)
             } else {
+                format!("{}/{}", page_url.trim_end_matches('/'), href)
+            };
+            if !full_link.contains(&target_host) { continue; }
+            if let Ok(pu) = url::Url::parse(&full_link) {
+                let params: Vec<(String, String)> = pu.query_pairs()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+                let base_path = format!("{}://{}{}", pu.scheme(), pu.host_str().unwrap_or(""), pu.path());
+                if !params.is_empty() {
+                    for (k, _) in &params {
+                        let key = format!("GET:{}?{}", base_path, k);
+                        if seen_params.insert(key) {
+                            discovered_params.push((base_path.clone(), k.clone(), "GET".to_string()));
+                        }
+                    }
+                    discovered_endpoints.push(json!({
+                        "type": "link",
+                        "url": full_link,
+                        "path": pu.path(),
+                        "parameters": params.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>()
+                    }));
+                }
+                // Queue non-parameterized same-origin links for depth-1 crawl
+                if depth == 0 && !crawled_pages.contains(&base_path) && crawled_pages.len() <= max_pages {
+                    crawl_queue.push((base_path, 1));
+                }
+            }
+        }
+
+        // --- Extract forms ---
+        for form_cap in form_re.captures_iter(&page_body) {
+            let form_html = &form_cap[0];
+            let form_body_html = &form_cap[1];
+            let action = action_re.captures(form_html)
+                .map(|m| m[1].to_string())
+                .unwrap_or_default();
+            let method = method_re.captures(form_html)
+                .map(|m| m[1].to_uppercase())
+                .unwrap_or_else(|| "GET".to_string());
+
+            let form_action_url = if action.is_empty() || action == "#" {
+                page_url.clone()
+            } else if action.starts_with("http") {
+                action.clone()
+            } else if action.starts_with('/') {
+                format!("{}{}", base_url, action)
+            } else {
+                format!("{}/{}", page_url.trim_end_matches('/'), action)
+            };
+
+            let mut input_names: Vec<String> = Vec::new();
+            for re in &[&input_re, &select_re, &textarea_re] {
+                for cap in re.captures_iter(form_body_html) {
+                    let name = cap[1].to_string();
+                    let key = format!("{}:{}?{}", method, form_action_url, name);
+                    if seen_params.insert(key) {
+                        discovered_params.push((form_action_url.clone(), name.clone(), method.clone()));
+                    }
+                    if !input_names.contains(&name) { input_names.push(name); }
+                }
+            }
+
+            if !input_names.is_empty() {
                 discovered_endpoints.push(json!({
-                    "type": "link",
-                    "url": full_url,
-                    "path": parsed_url.path()
+                    "type": "form",
+                    "action": form_action_url,
+                    "method": method,
+                    "parameters": input_names
                 }));
             }
         }
     }
 
-    // Extract forms with actions and input fields
-    let form_re = regex::Regex::new(r#"(?is)<form[^>]*>(.*?)</form>"#).unwrap();
-    let action_re = regex::Regex::new(r#"(?i)action\s*=\s*["']([^"']*)["']"#).unwrap();
-    let input_re = regex::Regex::new(r#"(?i)<input[^>]*name\s*=\s*["']([^"']+)["'][^>]*>"#).unwrap();
-    let method_re = regex::Regex::new(r#"(?i)method\s*=\s*["']([^"']+)["']"#).unwrap();
-
-    for form_cap in form_re.captures_iter(&body) {
-        let form_html = &form_cap[0];
-        let form_body = &form_cap[1];
-        let action = action_re.captures(form_html)
-            .map(|m| m[1].to_string())
-            .unwrap_or_default();
-        let method = method_re.captures(form_html)
-            .map(|m| m[1].to_uppercase())
-            .unwrap_or_else(|| "GET".to_string());
-
-        let form_url = if action.is_empty() || action == "#" {
-            url.clone()
-        } else if action.starts_with("http") {
-            action.clone()
-        } else if action.starts_with('/') {
-            format!("{}{}", base_url, action)
-        } else {
-            format!("{}/{}", url.trim_end_matches('/'), action)
-        };
-
-        let mut input_names: Vec<String> = Vec::new();
-        for input_cap in input_re.captures_iter(form_body) {
-            let name = input_cap[1].to_string();
-            let key = format!("{}?{}", form_url, name);
-            if seen_params.insert(key) {
-                discovered_params.push((form_url.clone(), name.clone()));
-            }
-            input_names.push(name);
-        }
-
-        if !input_names.is_empty() {
-            discovered_endpoints.push(json!({
-                "type": "form",
-                "action": form_url,
-                "method": method,
-                "parameters": input_names
-            }));
-        }
-    }
 
     // ── Security Header Analysis ─────────────────────────────────────
     let mut findings: Vec<serde_json::Value> = Vec::new();
@@ -1632,7 +1685,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
             "baseline_status": status,
             "headers": headers,
             "discovered_endpoints": discovered_endpoints,
-            "discovered_parameters": discovered_params.iter().map(|(ep, p)| json!({"endpoint": ep, "param": p})).collect::<Vec<_>>(),
+            "discovered_parameters": discovered_params.iter().map(|(ep, p, m)| json!({"endpoint": ep, "param": p, "method": m})).collect::<Vec<_>>(),
             "header_findings_count": findings.len(),
             "header_findings": findings,
             "NEXT_STEP": "Analyze discovered endpoints/parameters. Call WebSecScan with scan_type='targeted' and test_urls with your crafted payloads injected into the real parameters."
@@ -1754,22 +1807,58 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
     // ── Phase 2B: Auto-crawl mode — test discovered real parameters ──
     if scan_lower != "targeted" {
         if discovered_params.is_empty() {
-            // No injectable parameters found — do NOT blindly append ?q= to the base URL.
-            // Appending unknown params to a page that ignores them causes the normal page
-            // body to be returned, which can contain common numbers or strings and
-            // trigger false positive SSTI/SQLi/XSS findings.
             findings.push(json!({
                 "vulnerability": "No Injectable Parameters Discovered",
                 "severity": "Informational",
                 "url": url,
-                "evidence": "Crawl of the target page found no URL query parameters or HTML form inputs. Active payload injection was skipped to prevent false positives. Use /recon first, then /vulnscan with targeted URLs if you find attack surfaces manually.",
+                "evidence": "Multi-level crawl found no URL query parameters or HTML form inputs on the target or any linked page. Active payload injection was skipped to prevent false positives. Use /recon first, then /vulnscan with targeted URLs if you find attack surfaces manually.",
                 "remediation": "Manually inspect the application for hidden parameters, API endpoints, or JavaScript-driven inputs that the crawler cannot detect."
             }));
         } else {
-            for (endpoint_url, param_name) in &discovered_params {
+            for (endpoint_url, param_name, method) in &discovered_params {
                 for payload in &payloads {
-                    let test_url = format!("{}?{}={}", endpoint_url, urlencoding::encode(param_name), urlencoding::encode(payload));
-                    check_response(&test_url, payload, &mut findings);
+                    if method == "POST" {
+                        // Submit payload via POST form body
+                        let encoded_body = format!("{}={}", urlencoding::encode(param_name), urlencoding::encode(payload));
+                        if let Ok(res) = client
+                            .post(endpoint_url)
+                            .header("Content-Type", "application/x-www-form-urlencoded")
+                            .body(encoded_body)
+                            .send()
+                        {
+                            let st = res.status().as_u16();
+                            if let Ok(b) = res.text() {
+                                let lb = b.to_lowercase();
+                                let evidence_url = format!("POST {}?{}=<payload>", endpoint_url, param_name);
+                                let mut matched = false;
+                                if lb.contains("sql syntax") || lb.contains("microsoft oledb")
+                                    || lb.contains("ora-") || lb.contains("sqlite error")
+                                    || lb.contains("unclosed quotation") || lb.contains("system.data.sqlclient")
+                                    || lb.contains("sqlexception") || lb.contains("pg_query")
+                                    || lb.contains("mysql_") || lb.contains("you have an error in your sql")
+                                {
+                                    findings.push(json!({"vulnerability": "SQL Injection (POST)", "severity": "Critical", "payload": payload, "url": evidence_url, "evidence": format!("DB error signature in POST response. Status: {}", st)}));
+                                    matched = true;
+                                }
+                                let is_xss_payload = payload.contains("<script") || payload.contains("onerror=")
+                                    || payload.contains("onload=") || payload.contains("<svg") || payload.contains("<img");
+                                if is_xss_payload {
+                                    let enc = payload.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+                                    if b.contains(payload.as_str()) && !b.contains(enc.as_str()) {
+                                        findings.push(json!({"vulnerability": "Reflected XSS (POST)", "severity": "High", "payload": payload, "url": evidence_url, "evidence": "Payload reflected UNESCAPED via POST — exploitable XSS confirmed."}));
+                                        matched = true;
+                                    }
+                                }
+                                if st == 500 && !matched {
+                                    findings.push(json!({"vulnerability": "Unhandled Server Error (POST)", "severity": "Medium", "payload": payload, "url": evidence_url, "evidence": format!("HTTP 500 from POST payload: {}", payload)}));
+                                }
+                            }
+                        }
+                    } else {
+                        // GET request
+                        let test_url = format!("{}?{}={}", endpoint_url, urlencoding::encode(param_name), urlencoding::encode(payload));
+                        check_response(&test_url, payload, &mut findings);
+                    }
                 }
             }
         }
@@ -1799,8 +1888,9 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
         "scan_type": scan_type,
         "baseline_status": status,
         "headers": headers,
+        "pages_crawled": crawled_pages.len(),
         "discovered_endpoints": discovered_endpoints.len(),
-        "discovered_parameters": discovered_params.iter().map(|(ep, p)| format!("{} -> {}", ep, p)).collect::<Vec<_>>(),
+        "discovered_parameters": discovered_params.iter().map(|(ep, p, m)| format!("{} [{}] -> {}", ep, m, p)).collect::<Vec<_>>(),
         "payloads_tested": payloads.len(),
         "findings_count": findings.len(),
         "findings": findings

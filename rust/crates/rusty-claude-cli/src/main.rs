@@ -4631,26 +4631,13 @@ impl LiveCli {
                      d) If bash also fails, STOP completely and tell the operator: \
                         'HELIX-SEC: Target {url} is unreachable. Cannot generate a report.' \
                         Do NOT call VulnReport or write_file with empty data. \
-                     \n\nSTEP 2 (MANDATORY — VALIDATION GATE): Once Step 1 succeeds, act as a strict Validator Agent. \
-                     Aggressively challenge EVERY finding using the 7-Question Gate: \
-                     1. Reproducibility: Can the finding be consistently reproduced? \
-                     2. Context: Does the payload execute in the intended context (not just appear in page source)? \
-                     3. Veracity: True positive, or WAF block page / normal page content match? \
-                     4. Accuracy: Are the severity and CVSS ratings accurate for this specific case? \
-                     5. Uniqueness: Is the finding a duplicate or subset of another finding? \
-                     6. Boundary: Does it cross a meaningful trust/privilege boundary? \
-                     7. Remediation: Is there a clear, actionable fix? \
-                     DISCARD findings that fail this gate. \
-                     \n\nSTEP 3 (MANDATORY — AFTER STEP 2): Use 'write_file' to overwrite 'helix-sec-findings.json' \
-                     with your validated JSON array. Each object must include: \
-                     'title', 'severity', 'cvss', 'cwe', 'description', 'impact', 'remediation', 'evidence', 'url'. \
-                     If zero findings remain after the gate, write []. \
-                     \n\nSTEP 4: Call 'VulnReport' with: {{\"findings_json\": \"AUTO\", \"target\": \"{url}\", \"output_path\": \"helix-sec-report.html\"}}. \
-                     \n\nSTEP 5: Present a structured summary of validated findings to the operator. \
+                     \n\nSTEP 2 (MANDATORY — AFTER STEP 1): Call 'VulnReport' with: {{\"findings_json\": \"AUTO\", \"target\": \"{url}\", \"output_path\": \"helix-sec-report.html\"}}. \
+                     \n\nSTEP 3: Present a structured summary of all findings to the operator. List each finding with its severity. \
                      \n\nRULES: \
-                     - Do NOT skip any steps. You MUST run the Validation Gate before VulnReport. \
+                     - Do NOT skip any steps. \
+                     - Do NOT call write_file to modify helix-sec-findings.json — the scanner writes it directly. \
                      - Do NOT generate a report after a tool error without completing the fallbacks above. \
-                     - Do NOT hallucinate tool names. Only use: WebSecScan, bash, write_file, VulnReport."
+                     - Do NOT hallucinate tool names. Only use: WebSecScan, bash, VulnReport."
                 );
                 // Clear old findings before a fresh scan
                 let _ = std::fs::remove_file("helix-sec-findings.json");

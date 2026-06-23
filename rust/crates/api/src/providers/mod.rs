@@ -205,11 +205,17 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
             default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
         });
     }
-    // NVIDIA NIM hosted inference — z-ai/*, glm-*, and nim/* prefix.
+    // NVIDIA NIM hosted inference — z-ai/*, glm-*, nim/*, and meta/* prefixes.
     // Reads NVIDIA_API_KEY; base URL defaults to integrate.api.nvidia.com/v1.
     if canonical.starts_with("glm")
         || canonical.starts_with("nim/")
         || canonical.starts_with("z-ai/")
+        || canonical.starts_with("meta/")
+        || canonical.starts_with("nvidia/")
+        || canonical.starts_with("mistralai/")
+        || canonical.starts_with("google/")
+        || canonical.starts_with("microsoft/")
+        || canonical.starts_with("deepseek/")
     {
         return Some(ProviderMetadata {
             provider: ProviderKind::NvidiaAi,

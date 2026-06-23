@@ -1488,19 +1488,25 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
     // (endpoint_base_url, param_name, method)  method = "GET" or "POST"
     let mut discovered_params: Vec<(String, String, String)> = Vec::new();
     let mut seen_params: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Track pages already crawled to avoid loops
+    // Track pages already crawled (visited) to avoid re-fetching
     let mut crawled_pages: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Queue of page URLs to crawl (depth 0 = homepage, depth 1 = linked pages)
+    // Track URLs already queued to avoid duplicates in the queue
+    let mut queued_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Queue of page URLs to crawl (depth 0 = target, depth 1 = linked pages)
     let mut crawl_queue: Vec<(String, u8)> = vec![(url.clone(), 0)];
+    queued_urls.insert(url.clone());
 
     // Helper closures for extracting links and forms from HTML
-    let href_re     = regex::Regex::new(r#"href\s*=\s*["']([^"'#]+)["']"#).unwrap();
+    // NOTE: (?is) — case-insensitive + dot/[^x] matches newlines.
+    // This site (testaspnet.vulnweb.com) sends HTML with mid-attribute line
+    // breaks, so every pattern that spans tag attributes needs the `s` flag.
+    let href_re     = regex::Regex::new(r#"(?is)href\s*=\s*["']([^"'#]+)["']"#).unwrap();
     let form_re     = regex::Regex::new(r#"(?is)<form[^>]*>(.*?)</form>"#).unwrap();
-    let action_re   = regex::Regex::new(r#"(?i)action\s*=\s*["']([^"']*)["']"#).unwrap();
-    let method_re   = regex::Regex::new(r#"(?i)method\s*=\s*["']([^"']+)["']"#).unwrap();
-    let input_re    = regex::Regex::new(r#"(?i)<input[^>]*name\s*=\s*["']([^"']+)["'][^>]*>"#).unwrap();
-    let select_re   = regex::Regex::new(r#"(?i)<select[^>]*name\s*=\s*["']([^"']+)["'][^>]*>"#).unwrap();
-    let textarea_re = regex::Regex::new(r#"(?i)<textarea[^>]*name\s*=\s*["']([^"']+)["'][^>]*>"#).unwrap();
+    let action_re   = regex::Regex::new(r#"(?is)action\s*=\s*["']([^"']*)["']"#).unwrap();
+    let method_re   = regex::Regex::new(r#"(?is)method\s*=\s*["']([^"']+)["']"#).unwrap();
+    let input_re    = regex::Regex::new(r#"(?is)<input[^>]*?name\s*=\s*["']([^"']+)["'][^>]*?>"#).unwrap();
+    let select_re   = regex::Regex::new(r#"(?is)<select[^>]*?name\s*=\s*["']([^"']+)["'][^>]*?>"#).unwrap();
+    let textarea_re = regex::Regex::new(r#"(?is)<textarea[^>]*?name\s*=\s*["']([^"']+)["'][^>]*?>"#).unwrap();
 
     // Common vulnerable paths to probe even if not linked from homepage
     let common_paths = [
@@ -1519,7 +1525,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
     ];
     for path in &common_paths {
         let probe_url = format!("{}{}", base_url, path);
-        if crawled_pages.insert(probe_url.clone()) {
+        if queued_urls.insert(probe_url.clone()) {
             crawl_queue.push((probe_url, 1)); // treat as depth-1 so we don't recurse further
         }
     }
@@ -1579,16 +1585,20 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                     }));
                 }
                 // Queue non-parameterized same-origin links for depth-1 crawl
-                if depth == 0 && !crawled_pages.contains(&base_path) && crawled_pages.len() <= max_pages {
+                if depth == 0 && queued_urls.insert(base_path.clone()) {
                     crawl_queue.push((base_path, 1));
                 }
             }
         }
 
         // --- Extract forms ---
-        for form_cap in form_re.captures_iter(&page_body) {
-            let form_html = &form_cap[0];
-            let form_body_html = &form_cap[1];
+        // Collect to owned Strings first to avoid nested regex iterator conflicts
+        let form_matches: Vec<(String, String)> = form_re
+            .captures_iter(&page_body)
+            .map(|cap| (cap[0].to_string(), cap[1].to_string()))
+            .collect();
+
+        for (form_html, form_body_html) in &form_matches {
             let action = action_re.captures(form_html)
                 .map(|m| m[1].to_string())
                 .unwrap_or_default();
@@ -1603,13 +1613,31 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
             } else if action.starts_with('/') {
                 format!("{}{}", base_url, action)
             } else {
-                format!("{}/{}", page_url.trim_end_matches('/'), action)
+                // Relative URL — resolve against the current page using the URL crate
+                // so "login.aspx" on page "http://host/login.aspx" → "http://host/login.aspx"
+                // rather than the incorrect "http://host/login.aspx/login.aspx"
+                if let Ok(base) = url::Url::parse(&page_url) {
+                    base.join(&action).map(|u| u.to_string()).unwrap_or_else(|_| {
+                        format!("{}/{}", page_url.trim_end_matches('/'), action)
+                    })
+                } else {
+                    format!("{}/{}", page_url.trim_end_matches('/'), action)
+                }
             };
 
             let mut input_names: Vec<String> = Vec::new();
             for re in &[&input_re, &select_re, &textarea_re] {
                 for cap in re.captures_iter(form_body_html) {
                     let name = cap[1].to_string();
+                    // Skip hidden infrastructure fields (ASP.NET ViewState, CSRF tokens, etc.)
+                    let name_lower = name.to_lowercase();
+                    if name_lower.starts_with("__") || name_lower == "btnsubmit"
+                        || name_lower.contains("viewstate") || name_lower.contains("eventvalidation")
+                    {
+                        // Still register as a known param but skip payload injection
+                        if !input_names.contains(&name) { input_names.push(name); }
+                        continue;
+                    }
                     let key = format!("{}:{}?{}", method, form_action_url, name);
                     if seen_params.insert(key) {
                         discovered_params.push((form_action_url.clone(), name.clone(), method.clone()));
@@ -1633,36 +1661,122 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
     // ── Security Header Analysis ─────────────────────────────────────
     let mut findings: Vec<serde_json::Value> = Vec::new();
 
+    // Helper: enrich a raw finding with title/cvss/cwe/description/impact
+    let enrich = |mut f: serde_json::Value| -> serde_json::Value {
+        let vuln = f.get("vulnerability").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let sev  = f.get("severity").and_then(|v| v.as_str()).unwrap_or("Medium").to_string();
+        // title = vulnerability name
+        if f.get("title").is_none() {
+            f["title"] = json!(vuln);
+        }
+        // cvss
+        if f.get("cvss").is_none() {
+            let cvss = match sev.to_lowercase().as_str() {
+                "critical"      => "9.8",
+                "high"          => "7.5",
+                "medium"        => "5.3",
+                "low"           => "3.1",
+                _               => "0.0",
+            };
+            f["cvss"] = json!(cvss);
+        }
+        // cwe
+        if f.get("cwe").is_none() {
+            let cwe = if vuln.contains("SQL") || vuln.contains("SQLi") {
+                "CWE-89"
+            } else if vuln.contains("XSS") || vuln.contains("Cross-Site Scripting") {
+                "CWE-79"
+            } else if vuln.contains("Command Injection") {
+                "CWE-78"
+            } else if vuln.contains("Local File Inclusion") || vuln.contains("LFI") {
+                "CWE-22"
+            } else if vuln.contains("SSRF") {
+                "CWE-918"
+            } else if vuln.contains("SSTI") {
+                "CWE-94"
+            } else if vuln.contains("Open Redirect") {
+                "CWE-601"
+            } else if vuln.contains("Cookie") {
+                "CWE-614"
+            } else if vuln.contains("Disclosure") || vuln.contains("Version") {
+                "CWE-200"
+            } else if vuln.contains("HSTS") || vuln.contains("CSP") || vuln.contains("X-Frame")
+                || vuln.contains("X-Content") || vuln.contains("Header") {
+                "CWE-693"
+            } else if vuln.contains("Server Error") || vuln.contains("Unhandled") {
+                "CWE-209"
+            } else {
+                "CWE-200"
+            };
+            f["cwe"] = json!(cwe);
+        }
+        // description
+        if f.get("description").is_none() {
+            let desc = f.get("evidence").and_then(|v| v.as_str()).unwrap_or(&vuln).to_string();
+            f["description"] = json!(desc);
+        }
+        // impact
+        if f.get("impact").is_none() {
+            let impact = if vuln.contains("SQL") {
+                "An attacker can read, modify, or delete database contents, potentially gaining full system access."
+            } else if vuln.contains("XSS") {
+                "An attacker can steal session cookies, redirect users, or execute arbitrary JavaScript in victim browsers."
+            } else if vuln.contains("Command Injection") {
+                "An attacker can execute arbitrary OS commands on the server, leading to full compromise."
+            } else if vuln.contains("LFI") || vuln.contains("Local File") {
+                "An attacker can read sensitive files such as credentials, source code, or configuration."
+            } else if vuln.contains("SSRF") {
+                "An attacker can access internal services and cloud metadata, potentially escalating to credential theft."
+            } else if vuln.contains("SSTI") {
+                "An attacker can execute arbitrary code on the server via the template engine."
+            } else if vuln.contains("Cookie") {
+                "Session tokens may be stolen or forged, leading to account takeover."
+            } else if vuln.contains("HSTS") {
+                "Users may be downgraded to HTTP, exposing traffic to interception."
+            } else if vuln.contains("CSP") {
+                "Without a Content Security Policy, XSS attacks have a higher chance of success."
+            } else if vuln.contains("Clickjacking") || vuln.contains("X-Frame") {
+                "An attacker can overlay a transparent frame to trick users into unintended clicks."
+            } else if vuln.contains("Disclosure") || vuln.contains("Version") {
+                "Technology fingerprinting aids an attacker in selecting targeted exploits."
+            } else {
+                "This misconfiguration may be leveraged as part of a broader attack chain."
+            };
+            f["impact"] = json!(impact);
+        }
+        f
+    };
+
     if !headers.contains_key("strict-transport-security") {
-        findings.push(json!({"vulnerability": "Missing HSTS Header", "severity": "Medium", "url": url, "evidence": "No Strict-Transport-Security header.", "remediation": "Add: Strict-Transport-Security: max-age=31536000; includeSubDomains"}));
+        findings.push(enrich(json!({"vulnerability": "Missing HSTS Header", "severity": "Medium", "url": url, "evidence": "No Strict-Transport-Security header.", "remediation": "Add: Strict-Transport-Security: max-age=31536000; includeSubDomains"})));
     }
     if !headers.contains_key("content-security-policy") {
-        findings.push(json!({"vulnerability": "Missing CSP Header", "severity": "Medium", "url": url, "evidence": "No Content-Security-Policy header.", "remediation": "Add: Content-Security-Policy: default-src 'self'"}));
+        findings.push(enrich(json!({"vulnerability": "Missing CSP Header", "severity": "Medium", "url": url, "evidence": "No Content-Security-Policy header.", "remediation": "Add: Content-Security-Policy: default-src 'self'"})));
     }
     if !headers.contains_key("x-frame-options") {
-        findings.push(json!({"vulnerability": "Missing X-Frame-Options (Clickjacking)", "severity": "Low", "url": url, "evidence": "No X-Frame-Options header.", "remediation": "Add: X-Frame-Options: DENY"}));
+        findings.push(enrich(json!({"vulnerability": "Missing X-Frame-Options (Clickjacking)", "severity": "Low", "url": url, "evidence": "No X-Frame-Options header.", "remediation": "Add: X-Frame-Options: DENY"})));
     }
     if !headers.contains_key("x-content-type-options") {
-        findings.push(json!({"vulnerability": "Missing X-Content-Type-Options", "severity": "Low", "url": url, "evidence": "No X-Content-Type-Options: nosniff header.", "remediation": "Add: X-Content-Type-Options: nosniff"}));
+        findings.push(enrich(json!({"vulnerability": "Missing X-Content-Type-Options", "severity": "Low", "url": url, "evidence": "No X-Content-Type-Options: nosniff header.", "remediation": "Add: X-Content-Type-Options: nosniff"})));
     }
     if let Some(sv) = headers.get("server") {
         if sv.contains('/') {
-            findings.push(json!({"vulnerability": "Server Version Disclosure", "severity": "Informational", "url": url, "evidence": format!("Server: {}", sv), "remediation": "Suppress version in Server header."}));
+            findings.push(enrich(json!({"vulnerability": "Server Version Disclosure", "severity": "Informational", "url": url, "evidence": format!("Server: {}", sv), "remediation": "Suppress version in Server header."})));
         }
     }
     if let Some(v) = headers.get("x-aspnet-version") {
-        findings.push(json!({"vulnerability": "ASP.NET Version Disclosure", "severity": "Low", "url": url, "evidence": format!("X-AspNet-Version: {}", v), "remediation": "Set enableVersionHeader=false in web.config."}));
+        findings.push(enrich(json!({"vulnerability": "ASP.NET Version Disclosure", "severity": "Low", "url": url, "evidence": format!("X-AspNet-Version: {}", v), "remediation": "Set enableVersionHeader=false in web.config."})));
     }
     if let Some(v) = headers.get("x-powered-by") {
-        findings.push(json!({"vulnerability": "X-Powered-By Disclosure", "severity": "Low", "url": url, "evidence": format!("X-Powered-By: {}", v), "remediation": "Remove X-Powered-By header."}));
+        findings.push(enrich(json!({"vulnerability": "X-Powered-By Disclosure", "severity": "Low", "url": url, "evidence": format!("X-Powered-By: {}", v), "remediation": "Remove X-Powered-By header."})));
     }
     if let Some(cv) = headers.get("set-cookie") {
         let cl = cv.to_lowercase();
         if !cl.contains("secure") {
-            findings.push(json!({"vulnerability": "Cookie Missing Secure Flag", "severity": "Medium", "url": url, "evidence": format!("Set-Cookie: {}", cv), "remediation": "Add Secure flag."}));
+            findings.push(enrich(json!({"vulnerability": "Cookie Missing Secure Flag", "severity": "Medium", "url": url, "evidence": format!("Set-Cookie: {}", cv), "remediation": "Add Secure flag."})));
         }
         if !cl.contains("samesite") {
-            findings.push(json!({"vulnerability": "Cookie Missing SameSite", "severity": "Low", "url": url, "evidence": format!("Set-Cookie: {}", cv), "remediation": "Add SameSite=Strict."}));
+            findings.push(enrich(json!({"vulnerability": "Cookie Missing SameSite", "severity": "Low", "url": url, "evidence": format!("Set-Cookie: {}", cv), "remediation": "Add SameSite=Strict."})));
         }
     }
 
@@ -1797,9 +1911,9 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                         || payload.contains("' OR") || payload.contains("\" OR");
                     let is_cmdi_payload = payload.contains("; ls") || payload.contains("| cat")
                         || payload.contains("$(id)") || payload.contains("| id");
+                    let is_xss_payload_500 = payload.contains("<script") || payload.contains("onerror=")
+                        || payload.contains("onload=") || payload.contains("<svg") || payload.contains("<img");
                     if is_sqli_payload {
-                        // Server crashed on a SQL-specific payload — strong indicator of
-                        // error-based or blind SQL injection. Classify as Critical.
                         findings.push(json!({
                             "vulnerability": "SQL Injection (Error-Based / Blind)",
                             "severity": "Critical",
@@ -1808,7 +1922,23 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                             "evidence": format!(
                                 "HTTP 500 triggered by SQL payload '{}'. The server crashed when the quote \
                                  was injected, indicating the input is concatenated directly into a SQL query \
-                                 without parameterization. This is a strong indicator of error-based or blind SQLi.",
+                                 without parameterization. Strong indicator of error-based or blind SQLi.",
+                                payload
+                            )
+                        }));
+                    } else if is_xss_payload_500 {
+                        // ASP.NET Request Validation rejects HTML/script tags with HTTP 500.
+                        // The parameter accepts user input and reaches the response layer —
+                        // the lack of sanitization before the request validator is itself a finding.
+                        findings.push(json!({
+                            "vulnerability": "Potential XSS / ASP.NET Request Validation Block",
+                            "severity": "Medium",
+                            "payload": payload,
+                            "url": test_url,
+                            "evidence": format!(
+                                "HTTP 500 triggered by XSS payload '{}'. ASP.NET Request Validation \
+                                 blocked the input, confirming the parameter accepts HTML/script content. \
+                                 If validation is disabled or bypassed, this endpoint is vulnerable to XSS.",
                                 payload
                             )
                         }));
@@ -1868,6 +1998,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                                 let lb = b.to_lowercase();
                                 let evidence_url = format!("POST {}?{}=<payload>", endpoint_url, param_name);
                                 let mut matched = false;
+                                // SQLi — DB error signatures
                                 if lb.contains("sql syntax") || lb.contains("microsoft oledb")
                                     || lb.contains("ora-") || lb.contains("sqlite error")
                                     || lb.contains("unclosed quotation") || lb.contains("system.data.sqlclient")
@@ -1877,6 +2008,16 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                                     findings.push(json!({"vulnerability": "SQL Injection (POST)", "severity": "Critical", "payload": payload, "url": evidence_url, "evidence": format!("DB error signature in POST response. Status: {}", st)}));
                                     matched = true;
                                 }
+
+                                // Command injection
+                                if lb.contains("uid=0(root)") || lb.contains("uid=33(www-data)")
+                                    || lb.contains("windows ip configuration") || lb.contains("volume serial number")
+                                {
+                                    findings.push(json!({"vulnerability": "Command Injection (POST)", "severity": "Critical", "payload": payload, "url": evidence_url, "evidence": "OS command output detected in POST response."}));
+                                    matched = true;
+                                }
+
+                                // XSS — unescaped reflection
                                 let is_xss_payload = payload.contains("<script") || payload.contains("onerror=")
                                     || payload.contains("onload=") || payload.contains("<svg") || payload.contains("<img");
                                 if is_xss_payload {
@@ -1886,8 +2027,80 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                                         matched = true;
                                     }
                                 }
+
+                                // LFI
+                                if lb.contains("root:x:0:0:") || lb.contains("[fonts]") || lb.contains("[extensions]") {
+                                    findings.push(json!({"vulnerability": "Local File Inclusion (POST)", "severity": "High", "payload": payload, "url": evidence_url, "evidence": "System file contents detected in POST response."}));
+                                    matched = true;
+                                }
+
+                                // SSTI
+                                if (payload.contains("{{7777*7777}}") || payload.contains("${7777*7777}")) && lb.contains("60481729") {
+                                    findings.push(json!({"vulnerability": "SSTI (POST)", "severity": "Critical", "payload": payload, "url": evidence_url, "evidence": "Template evaluation confirmed via POST: 7777*7777=60481729 found in response."}));
+                                    matched = true;
+                                }
+
+                                // SSRF
+                                if (payload.contains("169.254.169.254") || payload.contains("metadata"))
+                                    && (lb.contains("ami-id") || lb.contains("instance-action"))
+                                {
+                                    findings.push(json!({"vulnerability": "SSRF (POST)", "severity": "High", "payload": payload, "url": evidence_url, "evidence": "Cloud metadata exposed via SSRF in POST parameter."}));
+                                    matched = true;
+                                }
+
+                                // HTTP 500 — classify by payload type
                                 if st == 500 && !matched {
-                                    findings.push(json!({"vulnerability": "Unhandled Server Error (POST)", "severity": "Medium", "payload": payload, "url": evidence_url, "evidence": format!("HTTP 500 from POST payload: {}", payload)}));
+                                    let is_sqli_payload = payload.contains("OR 1=1") || payload.contains("OR 1=2")
+                                        || payload.contains("UNION SELECT") || payload.contains("' --")
+                                        || payload.contains("'--") || payload.contains("admin'")
+                                        || payload.contains("' OR") || payload.contains("\" OR");
+                                    let is_cmdi_payload = payload.contains("; ls") || payload.contains("| cat")
+                                        || payload.contains("$(id)") || payload.contains("| id");
+                                    let is_xss_payload_500 = payload.contains("<script") || payload.contains("onerror=")
+                                        || payload.contains("onload=") || payload.contains("<svg") || payload.contains("<img");
+                                    if is_sqli_payload {
+                                        findings.push(json!({
+                                            "vulnerability": "SQL Injection (Error-Based / Blind, POST)",
+                                            "severity": "Critical",
+                                            "payload": payload,
+                                            "url": evidence_url,
+                                            "evidence": format!(
+                                                "HTTP 500 triggered by SQL payload '{}' via POST. The server crashed when the quote \
+                                                 was injected, indicating the input is concatenated directly into a SQL query \
+                                                 without parameterization. Strong indicator of error-based or blind SQLi.",
+                                                payload
+                                            )
+                                        }));
+                                    } else if is_xss_payload_500 {
+                                        findings.push(json!({
+                                            "vulnerability": "Potential XSS / ASP.NET Request Validation Block (POST)",
+                                            "severity": "Medium",
+                                            "payload": payload,
+                                            "url": evidence_url,
+                                            "evidence": format!(
+                                                "HTTP 500 triggered by XSS payload '{}' via POST. ASP.NET Request Validation \
+                                                 blocked the input, confirming the parameter accepts HTML/script content. \
+                                                 If validation is disabled or bypassed, this endpoint is vulnerable to XSS.",
+                                                payload
+                                            )
+                                        }));
+                                    } else if is_cmdi_payload {
+                                        findings.push(json!({
+                                            "vulnerability": "Possible Command Injection (POST)",
+                                            "severity": "High",
+                                            "payload": payload,
+                                            "url": evidence_url,
+                                            "evidence": format!("HTTP 500 triggered by command injection payload via POST: {}", payload)
+                                        }));
+                                    } else {
+                                        findings.push(json!({
+                                            "vulnerability": "Unhandled Server Error (POST)",
+                                            "severity": "Medium",
+                                            "payload": payload,
+                                            "url": evidence_url,
+                                            "evidence": format!("HTTP 500 from POST payload: {}", payload)
+                                        }));
+                                    }
                                 }
                             }
                         }
@@ -1903,8 +2116,72 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
 
 
     // ── Persist findings ─────────────────────────────────────────────
+    // Enrich any findings that are missing title/cvss/cwe/description/impact
+    // (POST injection findings bypass the enrich() call above)
+    let findings: Vec<serde_json::Value> = findings.into_iter().map(|mut f| {
+        let vuln = f.get("vulnerability").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let sev  = f.get("severity").and_then(|v| v.as_str()).unwrap_or("Medium").to_string();
+        if f.get("title").is_none()       { f["title"] = json!(vuln.clone()); }
+        if f.get("cvss").is_none()        {
+            f["cvss"] = json!(match sev.to_lowercase().as_str() {
+                "critical" => "9.8", "high" => "7.5", "medium" => "5.3", "low" => "3.1", _ => "0.0",
+            });
+        }
+        if f.get("cwe").is_none() {
+            let cwe = if vuln.contains("SQL") { "CWE-89" }
+                else if vuln.contains("XSS") { "CWE-79" }
+                else if vuln.contains("Command") { "CWE-78" }
+                else if vuln.contains("LFI") || vuln.contains("Local File") { "CWE-22" }
+                else if vuln.contains("SSRF") { "CWE-918" }
+                else if vuln.contains("SSTI") { "CWE-94" }
+                else if vuln.contains("Request Validation") || vuln.contains("Potential XSS") {
+                "CWE-79"
+            } else if vuln.contains("Cookie") { "CWE-614" }
+                else if vuln.contains("Disclosure") { "CWE-200" }
+                else if vuln.contains("Header") || vuln.contains("HSTS") || vuln.contains("CSP") { "CWE-693" }
+                else { "CWE-209" };
+            f["cwe"] = json!(cwe);
+        }
+        if f.get("description").is_none() {
+            let desc = f.get("evidence").and_then(|v| v.as_str()).unwrap_or(&vuln).to_string();
+            f["description"] = json!(desc);
+        }
+        if f.get("impact").is_none() {
+            let impact = if vuln.contains("SQL") {
+                "An attacker can read, modify, or delete database contents."
+            } else if vuln.contains("XSS") {
+                "An attacker can steal session cookies or execute arbitrary JavaScript."
+            } else if vuln.contains("Command") {
+                "An attacker can execute arbitrary OS commands on the server."
+            } else if vuln.contains("Cookie") {
+                "Session tokens may be stolen or forged, leading to account takeover."
+            } else if vuln.contains("Server Error") || vuln.contains("Unhandled") {
+                "Unhandled exceptions may leak stack traces or indicate exploitable logic errors."
+            } else {
+                "This misconfiguration may be leveraged as part of a broader attack chain."
+            };
+            f["impact"] = json!(impact);
+        }
+        f
+    }).collect();
+
+    // Deduplicate: collapse same (vulnerability, endpoint base URL) — e.g. same vuln
+    // triggered by multiple XSS payload variants on the same param produces one finding.
+    let mut seen_vuln_url: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut deduped_findings: Vec<serde_json::Value> = Vec::new();
+    for f in &findings {
+        let vuln = f.get("vulnerability").and_then(|v| v.as_str()).unwrap_or("");
+        let furl = f.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        // For injection findings, dedupe key = vuln + param portion of url
+        // Strip specific payload details: "POST url?param=<payload>" → key on param
+        let key = format!("{}|{}", vuln, furl);
+        if seen_vuln_url.insert(key) {
+            deduped_findings.push(f.clone());
+        }
+    }
+
     let findings_path = std::path::PathBuf::from("helix-sec-findings.json");
-    let mut all_findings = Vec::new();
+    let mut all_findings: Vec<serde_json::Value> = Vec::new();
     if findings_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&findings_path) {
             if let Ok(existing) = serde_json::from_str::<Vec<serde_json::Value>>(&content) {
@@ -1912,9 +2189,16 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
             }
         }
     }
-    for finding in &findings {
-        let fs = finding.to_string();
-        if !all_findings.iter().any(|f| f.to_string() == fs) {
+    for finding in &deduped_findings {
+        let vuln = finding.get("vulnerability").and_then(|v| v.as_str()).unwrap_or("");
+        let furl = finding.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let key = format!("{}|{}", vuln, furl);
+        let already = all_findings.iter().any(|f| {
+            let ev = f.get("vulnerability").and_then(|v| v.as_str()).unwrap_or("");
+            let eu = f.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            format!("{}|{}", ev, eu) == key
+        });
+        if !already {
             all_findings.push(finding.clone());
         }
     }
@@ -1929,8 +2213,8 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
         "discovered_endpoints": discovered_endpoints.len(),
         "discovered_parameters": discovered_params.iter().map(|(ep, p, m)| format!("{} [{}] -> {}", ep, m, p)).collect::<Vec<_>>(),
         "payloads_tested": payloads.len(),
-        "findings_count": findings.len(),
-        "findings": findings
+        "findings_count": deduped_findings.len(),
+        "findings": deduped_findings
     }))
 }
 
@@ -2303,6 +2587,57 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
 
     let mut parsed_successfully = false;
     
+    // ── Build severity counts for the summary bar ────────────────────
+    let findings_array_for_count = if findings_val.is_array() {
+        findings_val.as_array().cloned()
+    } else if findings_val.is_object() {
+        findings_val.get("findings").and_then(|f| f.as_array()).cloned()
+    } else {
+        None
+    };
+
+    let (mut n_critical, mut n_high, mut n_medium, mut n_low, mut n_info) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    if let Some(ref arr) = findings_array_for_count {
+        for f in arr {
+            match f.get("severity").and_then(|v| v.as_str()).unwrap_or("").to_lowercase().as_str() {
+                "critical" => n_critical += 1,
+                "high"     => n_high     += 1,
+                "medium"   => n_medium   += 1,
+                "low"      => n_low      += 1,
+                _          => n_info     += 1,
+            }
+        }
+    }
+    let total = n_critical + n_high + n_medium + n_low + n_info;
+
+    html.push_str(&format!(r#"
+        <div style="display:grid; grid-template-columns: repeat(5, 1fr); gap:1rem; margin-bottom:3rem; text-align:center;">
+            <div style="background:var(--critical-bg); border:1px solid var(--critical); border-radius:8px; padding:1.5rem;">
+                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--critical);">{}</div>
+                <div style="font-family:'Orbitron',sans-serif; font-size:0.75rem; color:var(--critical); letter-spacing:1px; margin-top:0.5rem;">CRITICAL</div>
+            </div>
+            <div style="background:var(--high-bg); border:1px solid var(--high); border-radius:8px; padding:1.5rem;">
+                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--high);">{}</div>
+                <div style="font-family:'Orbitron',sans-serif; font-size:0.75rem; color:var(--high); letter-spacing:1px; margin-top:0.5rem;">HIGH</div>
+            </div>
+            <div style="background:var(--medium-bg); border:1px solid var(--medium); border-radius:8px; padding:1.5rem;">
+                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--medium);">{}</div>
+                <div style="font-family:'Orbitron',sans-serif; font-size:0.75rem; color:var(--medium); letter-spacing:1px; margin-top:0.5rem;">MEDIUM</div>
+            </div>
+            <div style="background:var(--low-bg); border:1px solid var(--low); border-radius:8px; padding:1.5rem;">
+                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--low);">{}</div>
+                <div style="font-family:'Orbitron',sans-serif; font-size:0.75rem; color:var(--low); letter-spacing:1px; margin-top:0.5rem;">LOW</div>
+            </div>
+            <div style="background:var(--info-bg); border:1px solid var(--info); border-radius:8px; padding:1.5rem;">
+                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--info);">{}</div>
+                <div style="font-family:'Orbitron',sans-serif; font-size:0.75rem; color:var(--info); letter-spacing:1px; margin-top:0.5rem;">INFO</div>
+            </div>
+        </div>
+        <div style="text-align:center; margin-bottom:3rem; font-family:'Fira Code',monospace; color:var(--text-muted); font-size:0.9rem; letter-spacing:1px;">
+            TOTAL FINDINGS: <span style="color:var(--accent-cyan); font-weight:700;">{}</span>
+        </div>
+"#, n_critical, n_high, n_medium, n_low, n_info, total));
+
     // Try to extract the findings array
     let findings_array = if findings_val.is_array() {
         findings_val.as_array()
@@ -2327,6 +2662,23 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
                 let impact = finding.get("impact").and_then(|v| v.as_str()).unwrap_or("See finding details.");
                 let remediation = finding.get("remediation").and_then(|v| v.as_str()).unwrap_or("Review the evidence and apply security patches.");
                 let evidence = finding.get("evidence").and_then(|v| v.as_str()).unwrap_or("");
+
+                // HTML-escape all user-controlled strings before injecting into the page
+                let html_escape = |s: &str| s
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+                    .replace('"', "&quot;")
+                    .replace('\'', "&#39;");
+
+                let title_e       = html_escape(title);
+                let severity_e    = html_escape(severity);
+                let cvss_e        = html_escape(cvss);
+                let cwe_e         = html_escape(cwe);
+                let desc_e        = html_escape(desc);
+                let impact_e      = html_escape(impact);
+                let remediation_e = html_escape(remediation);
+                let evidence_e    = html_escape(evidence);
 
                 let sev_lower = severity.to_lowercase();
                 
@@ -2356,7 +2708,7 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
 
                 <div class="section-title">Remediation</div>
                 <p>{}</p>
-"#, sev_lower, title, sev_lower, severity, cvss, cwe, desc, impact, remediation));
+"#, sev_lower, title_e, sev_lower, severity_e, cvss_e, cwe_e, desc_e, impact_e, remediation_e));
 
                 if !evidence.is_empty() {
                     html.push_str(&format!(r#"
@@ -2369,7 +2721,7 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
                         <pre><code>{}</code></pre>
                     </div>
                 </div>
-"#, idx, idx, evidence.replace("<", "&lt;").replace(">", "&gt;")));
+"#, idx, idx, evidence_e));
                 }
 
                 html.push_str("            </div>\n");

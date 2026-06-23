@@ -4619,26 +4619,38 @@ impl LiveCli {
                      Your target is {url}. \
                      \n\nSTEP 1 (MANDATORY — DO THIS FIRST): Call the 'WebSecScan' tool with: \
                      {{\"url\": \"{url}\", \"scan_type\": \"full\", \"payloads\": [\"' OR 1=1--\", \"<script>alert(1)</script>\"]}}. \
-                     The tool will automatically inject a comprehensive payload suite and analyze \
-                     security headers. Wait for the results. \
-                     \n\nSTEP 2 (MANDATORY — VALIDATION GATE): Once Step 1 completes, act as a Validator Agent. \
-                     Aggressively challenge EVERY finding from WebSecScan using the 7-Question Gate Strategy: \
+                     The tool will crawl the target, inject a comprehensive payload suite, and analyze security headers. \
+                     Wait for the results before proceeding. \
+                     \n\nERROR HANDLING (CRITICAL — READ BEFORE PROCEEDING): If WebSecScan returns an error \
+                     (e.g. 'error sending request', connection refused, timeout, DNS failure): \
+                     a) DO NOT proceed to write_file or VulnReport with empty or zero findings. \
+                     b) Retry WebSecScan exactly once with the same parameters. \
+                     c) If it fails again, fall back to bash with: \
+                        curl -sI -A 'HELIX-SEC/1.0' --connect-timeout 30 --max-time 45 '{url}' \
+                        to gather HTTP headers for analysis. \
+                     d) If bash also fails, STOP completely and tell the operator: \
+                        'HELIX-SEC: Target {url} is unreachable. Cannot generate a report.' \
+                        Do NOT call VulnReport or write_file with empty data. \
+                     \n\nSTEP 2 (MANDATORY — VALIDATION GATE): Once Step 1 succeeds, act as a strict Validator Agent. \
+                     Aggressively challenge EVERY finding using the 7-Question Gate: \
                      1. Reproducibility: Can the finding be consistently reproduced? \
-                     2. Context: Does the payload execute in the intended context? \
-                     3. Veracity: Is it a true positive, or just a reflection/WAF block page? \
-                     4. Accuracy: Are the security impact and risk ratings accurate? \
-                     5. Uniqueness: Is the finding a duplicate or part of another finding? \
-                     6. Boundary: Does it cross a privilege boundary? \
-                     7. Remediation: Is there a clear, actionable remediation? \
-                     Discard any findings that fail this gate. Only proceed with high-fidelity, validated findings. \
-                     \n\nSTEP 3 (MANDATORY — DO THIS AFTER STEP 2): Use the 'write_file' tool to overwrite 'helix-sec-findings.json' with your finalized, deduplicated, and validated JSON array. Ensure each finding in the array includes: 'title', 'severity', 'cvss', 'cwe', 'description', 'impact', 'remediation', 'evidence', and 'url'. \
-                     \n\nSTEP 4: Call the 'VulnReport' tool with: {{\"findings_json\": \"AUTO\", \"target\": \"{url}\", \"output_path\": \"helix-sec-report.html\"}}. \
-                     \n\nSTEP 5: Present a summary of the validated findings to the operator. \
+                     2. Context: Does the payload execute in the intended context (not just appear in page source)? \
+                     3. Veracity: True positive, or WAF block page / normal page content match? \
+                     4. Accuracy: Are the severity and CVSS ratings accurate for this specific case? \
+                     5. Uniqueness: Is the finding a duplicate or subset of another finding? \
+                     6. Boundary: Does it cross a meaningful trust/privilege boundary? \
+                     7. Remediation: Is there a clear, actionable fix? \
+                     DISCARD findings that fail this gate. \
+                     \n\nSTEP 3 (MANDATORY — AFTER STEP 2): Use 'write_file' to overwrite 'helix-sec-findings.json' \
+                     with your validated JSON array. Each object must include: \
+                     'title', 'severity', 'cvss', 'cwe', 'description', 'impact', 'remediation', 'evidence', 'url'. \
+                     If zero findings remain after the gate, write []. \
+                     \n\nSTEP 4: Call 'VulnReport' with: {{\"findings_json\": \"AUTO\", \"target\": \"{url}\", \"output_path\": \"helix-sec-report.html\"}}. \
+                     \n\nSTEP 5: Present a structured summary of validated findings to the operator. \
                      \n\nRULES: \
-                     - Do NOT call the Skill tool. The methodology is embedded in this prompt. \
-                     - Do NOT skip any steps. You MUST perform the Validation Gate before calling VulnReport. \
-                     - Do NOT call WebSecScan more than once unless asked. The built-in suite is comprehensive. \
-                     - Do NOT hallucinate tool names. Only use: WebSecScan, VulnReport, write_file."
+                     - Do NOT skip any steps. You MUST run the Validation Gate before VulnReport. \
+                     - Do NOT generate a report after a tool error without completing the fallbacks above. \
+                     - Do NOT hallucinate tool names. Only use: WebSecScan, bash, write_file, VulnReport."
                 );
                 // Clear old findings before a fresh scan
                 let _ = std::fs::remove_file("helix-sec-findings.json");

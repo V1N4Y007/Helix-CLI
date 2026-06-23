@@ -1443,14 +1443,33 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
     };
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("Mozilla/5.0 (compatible; HELIX-SEC/1.0; +https://github.com/V1N4Y007/Helix-CLI)")
         .build()
         .map_err(|e| e.to_string())?;
 
-    // ── Phase 0: Baseline request ────────────────────────────────────
-    let res = client.get(&url).send().map_err(|e| e.to_string())?;
+    // ── Phase 0: Baseline request (3 attempts, 2 s backoff) ──────────
+    let mut last_err = String::new();
+    let mut baseline_res = None;
+    for attempt in 1..=3u8 {
+        match client.get(&url).send() {
+            Ok(r) => { baseline_res = Some(r); break; }
+            Err(e) => {
+                last_err = e.to_string();
+                if attempt < 3 {
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+            }
+        }
+    }
+    let res = baseline_res.ok_or_else(|| format!(
+        "WebSecScan: baseline request failed after 3 attempts. Last error: {}. \
+         The target may be offline, behind a firewall, or refusing connections. \
+         Try using bash with curl as a fallback.",
+        last_err
+    ))?;
     let status = res.status().as_u16();
     let headers: std::collections::HashMap<String, String> = res
         .headers()
@@ -1458,6 +1477,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
         .collect();
     let body = res.text().unwrap_or_default();
+
 
     // ── Phase 1: Endpoint Discovery (Crawling) ──────────────────────
     let parsed_base = url::Url::parse(&url).unwrap_or_else(|_| url::Url::parse("http://localhost").unwrap());

@@ -1633,12 +1633,14 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
         }
     }
     // Add built-in payloads for full/owasp mode
+    // NOTE: SSTI uses a HIGH-ENTROPY canary (7777*7777=60481729) to avoid collisions
+    // with common numbers found on normal pages (like 49 from 7*7).
     if scan_lower == "full" || scan_lower == "owasp" || scan_lower.is_empty() {
         for p in &["' OR 1=1--", "' UNION SELECT NULL,NULL,NULL--", "admin'--",
                     "<script>alert(1)</script>", "<img src=x onerror=alert(1)>", "\"><svg onload=alert(1)>",
                     "; ls -la", "| cat /etc/passwd", "$(id)",
                     "../../../../etc/passwd", "..\\..\\..\\..\\windows\\win.ini",
-                    "{{7*7}}", "${7*7}",
+                    "{{7777*7777}}", "${7777*7777}",
                     "http://169.254.169.254/latest/meta-data/"] {
             let ps = p.to_string();
             if !payloads.contains(&ps) { payloads.push(ps); }
@@ -1672,11 +1674,25 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                 }
 
                 // XSS (Reflection)
-                if body.contains(payload) && (payload.contains("<script") || payload.contains("onerror=")
-                    || payload.contains("onload=") || payload.contains("<svg") || payload.contains("<img"))
-                {
-                    findings.push(json!({"vulnerability": "Reflected XSS", "severity": "High", "payload": payload, "url": test_url, "evidence": "Payload reflected unescaped in response."}));
-                    matched = true;
+                // TRUE POSITIVE: payload must appear RAW (unescaped) in the response.
+                // HTML-encoded reflection (e.g. &lt;script&gt;) is NOT exploitable XSS.
+                let is_xss_payload = payload.contains("<script") || payload.contains("onerror=")
+                    || payload.contains("onload=") || payload.contains("<svg") || payload.contains("<img");
+                if is_xss_payload {
+                    let html_encoded_payload = payload
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;")
+                        .replace('"', "&quot;");
+                    let raw_reflected    = body.contains(payload);
+                    let encoded_reflected = body.contains(&html_encoded_payload);
+                    if raw_reflected && !encoded_reflected {
+                        // Only unescaped reflection — genuine XSS candidate
+                        findings.push(json!({"vulnerability": "Reflected XSS", "severity": "High", "payload": payload, "url": test_url, "evidence": "Payload reflected UNESCAPED in response — exploitable XSS confirmed."}));
+                        matched = true;
+                    }
+                    // If encoded_reflected is true: safe output, skip.
+                    // If neither: param not reflected at all, skip.
                 }
 
                 // SSRF
@@ -1693,9 +1709,10 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                     matched = true;
                 }
 
-                // SSTI
-                if (payload.contains("{{7*7}}") || payload.contains("${7*7}")) && lb.contains("49") {
-                    findings.push(json!({"vulnerability": "SSTI", "severity": "Critical", "payload": payload, "url": test_url, "evidence": "Template eval: 7*7=49 in response."}));
+                // SSTI — uses high-entropy canary 7777*7777=60481729
+                // This number is extremely unlikely to appear naturally on a page.
+                if (payload.contains("{{7777*7777}}") || payload.contains("${7777*7777}")) && lb.contains("60481729") {
+                    findings.push(json!({"vulnerability": "SSTI", "severity": "Critical", "payload": payload, "url": test_url, "evidence": "Template evaluation confirmed: 7777*7777=60481729 found in response."}));
                     matched = true;
                 }
 
@@ -1716,24 +1733,28 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
 
     // ── Phase 2B: Auto-crawl mode — test discovered real parameters ──
     if scan_lower != "targeted" {
-        for (endpoint_url, param_name) in &discovered_params {
-            for payload in &payloads {
-                let test_url = format!("{}?{}={}", endpoint_url, urlencoding::encode(param_name), urlencoding::encode(payload));
-                check_response(&test_url, payload, &mut findings);
-            }
-        }
-        // Also test the base URL if no params were discovered
         if discovered_params.is_empty() {
-            for payload in &payloads {
-                let test_url = if url.contains('?') {
-                    format!("{}&q={}", url, urlencoding::encode(payload))
-                } else {
-                    format!("{}?q={}", url, urlencoding::encode(payload))
-                };
-                check_response(&test_url, payload, &mut findings);
+            // No injectable parameters found — do NOT blindly append ?q= to the base URL.
+            // Appending unknown params to a page that ignores them causes the normal page
+            // body to be returned, which can contain common numbers or strings and
+            // trigger false positive SSTI/SQLi/XSS findings.
+            findings.push(json!({
+                "vulnerability": "No Injectable Parameters Discovered",
+                "severity": "Informational",
+                "url": url,
+                "evidence": "Crawl of the target page found no URL query parameters or HTML form inputs. Active payload injection was skipped to prevent false positives. Use /recon first, then /vulnscan with targeted URLs if you find attack surfaces manually.",
+                "remediation": "Manually inspect the application for hidden parameters, API endpoints, or JavaScript-driven inputs that the crawler cannot detect."
+            }));
+        } else {
+            for (endpoint_url, param_name) in &discovered_params {
+                for payload in &payloads {
+                    let test_url = format!("{}?{}={}", endpoint_url, urlencoding::encode(param_name), urlencoding::encode(payload));
+                    check_response(&test_url, payload, &mut findings);
+                }
             }
         }
     }
+
 
     // ── Persist findings ─────────────────────────────────────────────
     let findings_path = std::path::PathBuf::from("helix-sec-findings.json");

@@ -4614,29 +4614,181 @@ impl LiveCli {
                 eprintln!("  \x1b[2mTarget: {url}\x1b[0m");
                 eprintln!();
 
+                // ── Detect platform and available external tools ──────────────
+                let is_windows = cfg!(target_os = "windows");
+                let platform_name = if is_windows { "Windows" } else { "Linux/macOS" };
+
+                // Check which external tools are available
+                let tool_check = |cmd: &str| -> bool {
+                    if is_windows {
+                        std::process::Command::new("where")
+                            .arg(cmd)
+                            .output()
+                            .map(|o| o.status.success())
+                            .unwrap_or(false)
+                    } else {
+                        std::process::Command::new("which")
+                            .arg(cmd)
+                            .output()
+                            .map(|o| o.status.success())
+                            .unwrap_or(false)
+                    }
+                };
+
+                let has_nmap     = tool_check("nmap");
+                let has_sqlmap   = tool_check("sqlmap");
+                let has_gobuster = tool_check("gobuster");
+                let has_ffuf     = tool_check("ffuf");
+                let has_subfinder= tool_check("subfinder");
+                let has_wsl      = is_windows && std::process::Command::new("wsl")
+                    .arg("--status")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+
+                // Build tool availability section for the prompt
+                let mut tool_status = format!(
+                    "PLATFORM: {platform_name}\nEXTERNAL TOOLS AVAILABLE ON THIS MACHINE:"
+                );
+                if has_nmap     { tool_status.push_str("\n  - nmap (port/service scanning)"); }
+                if has_sqlmap   { tool_status.push_str("\n  - sqlmap (advanced SQL injection)"); }
+                if has_gobuster { tool_status.push_str("\n  - gobuster (directory brute-force)"); }
+                if has_ffuf     { tool_status.push_str("\n  - ffuf (web fuzzer, directory/param brute-force)"); }
+                if has_subfinder{ tool_status.push_str("\n  - subfinder (subdomain enumeration)"); }
+                if has_wsl      { tool_status.push_str("\n  - wsl (Linux tools available via WSL)"); }
+                if !has_nmap && !has_sqlmap && !has_gobuster && !has_ffuf && !has_subfinder {
+                    tool_status.push_str("\n  (none detected — Rust scanner only)");
+                }
+
+                // Build platform-correct command syntax notes
+                let syntax_note = if is_windows {
+                    "WINDOWS COMMAND SYNTAX:\n  \
+                     - Use PowerShell syntax in bash tool calls\n  \
+                     - Path separator: backslash (\\) or forward slash (/)\n  \
+                     - sqlmap: 'python sqlmap.py' or 'sqlmap' depending on install\n  \
+                     - gobuster/ffuf: installed via scoop/choco, use as-is if available\n  \
+                     - nmap: use full path if needed (C:\\Program Files (x86)\\Nmap\\nmap.exe)\n  \
+                     - WSL: prefix commands with 'wsl ' to run Linux tools if wsl is available"
+                } else {
+                    "LINUX/MACOS COMMAND SYNTAX:\n  \
+                     - Standard POSIX shell syntax\n  \
+                     - sqlmap: 'sqlmap' directly\n  \
+                     - All tools callable by name if in PATH"
+                };
+
+                // Build the phase 2 instructions based on what's available
+                let mut phase2_steps = String::new();
+
+                if has_nmap {
+                    let nmap_cmd = if is_windows {
+                        format!("nmap -sV -sC --open -T4 -p 80,443,8080,8443,8000,8888 {url}")
+                    } else {
+                        format!("nmap -sV -sC --open -T4 -p 80,443,8080,8443,8000,8888 {url}")
+                    };
+                    phase2_steps.push_str(&format!(
+                        "\n  PHASE 2a — SERVICE FINGERPRINTING (nmap available): Run: {nmap_cmd}\n  \
+                         Parse the output for service versions and add them to your findings context."
+                    ));
+                }
+
+                if has_subfinder {
+                    let parsed_host = {
+                        // Extract host from URL via simple string parsing
+                        let s = url.trim_start_matches("http://").trim_start_matches("https://");
+                        let host = s.split('/').next().unwrap_or(s);
+                        // Get root domain (last two parts)
+                        let parts: Vec<&str> = host.split('.').collect();
+                        if parts.len() >= 2 {
+                            format!("{}.{}", parts[parts.len()-2], parts[parts.len()-1])
+                        } else {
+                            host.to_string()
+                        }
+                    };
+                    phase2_steps.push_str(&format!(
+                        "\n  PHASE 2b — SUBDOMAIN ENUMERATION (subfinder available): Run: subfinder -d {parsed_host} -silent\n  \
+                         Enumerate subdomains to expand the attack surface."
+                    ));
+                    let _ = parsed_host; // used above
+                }
+
+                if has_gobuster || has_ffuf {
+                    let dir_cmd = if has_ffuf {
+                        if is_windows {
+                            format!("ffuf -w C:\\wordlists\\common.txt -u {url}/FUZZ -mc 200,301,302,403 -t 20")
+                        } else {
+                            format!("ffuf -w /usr/share/wordlists/dirb/common.txt -u {url}/FUZZ -mc 200,301,302,403 -t 20")
+                        }
+                    } else {
+                        if is_windows {
+                            format!("gobuster dir -u {url} -w C:\\wordlists\\common.txt -t 20 --no-error")
+                        } else {
+                            format!("gobuster dir -u {url} -w /usr/share/wordlists/dirb/common.txt -t 20 --no-error")
+                        }
+                    };
+                    phase2_steps.push_str(&format!(
+                        "\n  PHASE 2c — DIRECTORY DISCOVERY ({} available): Run: {dir_cmd}\n  \
+                         Find hidden endpoints not linked from the homepage.",
+                        if has_ffuf { "ffuf" } else { "gobuster" }
+                    ));
+                }
+
+                if has_sqlmap {
+                    let sqlmap_cmd = if is_windows {
+                        format!(
+                            "sqlmap -u \"{url}\" --forms --batch --level=2 --risk=1 \
+                             --dbms=auto --output-dir=sqlmap-output --no-logging 2>&1 | Select-String -Pattern 'injectable|Parameter|sqlmap identified' | Select-Object -First 20"
+                        )
+                    } else {
+                        format!(
+                            "sqlmap -u \"{url}\" --forms --batch --level=2 --risk=1 \
+                             --dbms=auto --output-dir=/tmp/sqlmap-output 2>&1 | grep -E 'injectable|Parameter|sqlmap identified' | head -20"
+                        )
+                    };
+                    phase2_steps.push_str(&format!(
+                        "\n  PHASE 2d — ADVANCED SQL INJECTION (sqlmap available):\n  \
+                         Run against discovered parameters from Phase 1. Use the discovered_parameters \
+                         from WebSecScan output to target specific endpoints. Command: {sqlmap_cmd}\n  \
+                         IMPORTANT: Only run sqlmap on URLs/parameters discovered in Phase 1. \
+                         Add any confirmed SQLi findings to your context before generating the report."
+                    ));
+                }
+
+                let phase2_section = if phase2_steps.is_empty() {
+                    String::from(
+                        "\n\nPHASE 2 — EXTERNAL TOOLS: No external tools detected on this machine. \
+                         Proceeding with Rust scanner results only. Install nmap, sqlmap, gobuster, \
+                         subfinder for deeper scanning."
+                    )
+                } else {
+                    format!(
+                        "\n\nPHASE 2 — EXTERNAL TOOL AUGMENTATION (run AFTER Phase 1 completes):\
+                         {phase2_steps}\
+                         \n  Run only the tools listed above. Do NOT attempt to run tools not listed."
+                    )
+                };
+
                 let prompt = format!(
                     "You are HELIX-SEC, an autonomous web vulnerability assessment engine. \
                      Your target is {url}. \
-                     \n\nSTEP 1 (MANDATORY — DO THIS FIRST): Call the 'WebSecScan' tool with: \
+                     \n\n{tool_status}\
+                     \n{syntax_note}\
+                     \n\nPHASE 1 — MANDATORY RUST SCANNER (DO THIS FIRST): \
+                     Call the 'WebSecScan' tool with: \
                      {{\"url\": \"{url}\", \"scan_type\": \"full\", \"payloads\": [\"' OR 1=1--\", \"<script>alert(1)</script>\"]}}. \
-                     The tool will crawl the target, inject a comprehensive payload suite, and analyze security headers. \
-                     Wait for the results before proceeding. \
-                     \n\nERROR HANDLING (CRITICAL — READ BEFORE PROCEEDING): If WebSecScan returns an error \
-                     (e.g. 'error sending request', connection refused, timeout, DNS failure): \
-                     a) DO NOT proceed to write_file or VulnReport with empty or zero findings. \
-                     b) Retry WebSecScan exactly once with the same parameters. \
-                     c) If it fails again, fall back to bash with: \
-                        curl -sI -A 'HELIX-SEC/1.0' --connect-timeout 30 --max-time 45 '{url}' \
-                        to gather HTTP headers for analysis. \
-                     d) If bash also fails, STOP completely and tell the operator: \
-                        'HELIX-SEC: Target {url} is unreachable. Cannot generate a report.' \
-                        Do NOT call VulnReport or write_file with empty data. \
-                     \n\nSTEP 2 (MANDATORY — AFTER STEP 1): Call 'VulnReport' with: {{\"findings_json\": \"AUTO\", \"target\": \"{url}\", \"output_path\": \"helix-sec-report.html\"}}. \
-                     \n\nSTEP 3: Present a structured summary of all findings to the operator. List each finding with its severity. \
+                     The tool crawls the target, injects a comprehensive payload suite, discovers \
+                     forms and parameters, and analyzes security headers. Wait for results before proceeding.\
+                     \n\nERROR HANDLING: If WebSecScan fails (connection error, timeout, DNS failure): \
+                     a) Retry once with the same parameters. \
+                     b) If it fails again, use bash to run: curl -sI -A 'HELIX-SEC/1.0' --connect-timeout 30 '{url}' \
+                     c) If that also fails, STOP and report the target is unreachable. Do NOT call VulnReport with empty data.\
+                     {phase2_section}\
+                     \n\nFINAL STEP — REPORT: After all phases complete, call 'VulnReport' with: \
+                     {{\"findings_json\": \"AUTO\", \"target\": \"{url}\", \"output_path\": \"helix-sec-report.html\"}}. \
+                     Then present a structured summary of ALL findings with severities to the operator.\
                      \n\nRULES: \
-                     - Do NOT skip any steps. \
-                     - Do NOT call write_file to modify helix-sec-findings.json — the scanner writes it directly. \
-                     - Do NOT generate a report after a tool error without completing the fallbacks above. \
+                     - Complete Phase 1 before Phase 2. \
+                     - Do NOT call write_file to modify helix-sec-findings.json. \
+                     - Do NOT run tools not listed in the available tools above. \
                      - Do NOT hallucinate tool names. Only use: WebSecScan, bash, VulnReport."
                 );
                 // Clear old findings before a fresh scan

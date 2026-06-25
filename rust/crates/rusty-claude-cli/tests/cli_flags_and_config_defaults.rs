@@ -297,4 +297,3 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ))
 }
-

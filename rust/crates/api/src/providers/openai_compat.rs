@@ -520,7 +520,11 @@ impl StreamState {
         }
 
         for choice in chunk.choices {
-            if let Some(reasoning) = choice.delta.reasoning_content.filter(|value| !value.is_empty()) {
+            if let Some(reasoning) = choice
+                .delta
+                .reasoning_content
+                .filter(|value| !value.is_empty())
+            {
                 if !self.thinking_started {
                     self.thinking_started = true;
                     events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
@@ -533,7 +537,9 @@ impl StreamState {
                 }
                 events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
                     index: 0,
-                    delta: ContentBlockDelta::ThinkingDelta { thinking: reasoning },
+                    delta: ContentBlockDelta::ThinkingDelta {
+                        thinking: reasoning,
+                    },
                 }));
             }
 

@@ -22,7 +22,11 @@ pub struct BashCommandInput {
     #[serde(default, deserialize_with = "deserialize_optional_number_from_string")]
     pub timeout: Option<u64>,
     pub description: Option<String>,
-    #[serde(rename = "run_in_background", default, deserialize_with = "deserialize_optional_bool_from_string")]
+    #[serde(
+        rename = "run_in_background",
+        default,
+        deserialize_with = "deserialize_optional_bool_from_string"
+    )]
     pub run_in_background: Option<bool>,
     #[serde(rename = "dangerouslyDisableSandbox")]
     pub dangerously_disable_sandbox: Option<bool>,
@@ -68,7 +72,9 @@ pub struct BashCommandOutput {
     pub sandbox_status: Option<SandboxStatus>,
 }
 
-pub fn deserialize_optional_bool_from_string<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+pub fn deserialize_optional_bool_from_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -88,7 +94,9 @@ where
     }
 }
 
-pub fn deserialize_optional_number_from_string<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+pub fn deserialize_optional_number_from_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

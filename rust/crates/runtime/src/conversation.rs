@@ -502,7 +502,10 @@ where
             if tool_results.iter().any(|msg| {
                 msg.blocks.iter().any(|block| {
                     if let ContentBlock::ToolResult { tool_name, .. } = block {
-                        matches!(tool_name.as_str(), "SendUserMessage" | "Brief" | "AskUserQuestion")
+                        matches!(
+                            tool_name.as_str(),
+                            "SendUserMessage" | "Brief" | "AskUserQuestion"
+                        )
                     } else {
                         false
                     }

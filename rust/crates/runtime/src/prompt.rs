@@ -515,7 +515,7 @@ fn get_actions_section() -> String {
     [
         "# Executing actions with care".to_string(),
         "Carefully consider reversibility and blast radius. Local, reversible actions like editing files or running tests are usually fine. Actions that affect shared systems, publish state, delete data, or otherwise have high blast radius should be explicitly authorized by the user or durable workspace instructions.".to_string(),
-        "".to_string(),
+        String::new(),
         "CRITICAL INSTRUCTION FOR TOOL USAGE:".to_string(),
         "When the user greets you or asks casual conversational questions, you MUST respond warmly with raw text. Do not use 'bash' or any other tool to format or send your response; just speak naturally.".to_string(),
     ]

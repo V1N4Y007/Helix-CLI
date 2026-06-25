@@ -1443,7 +1443,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
     let (url, scan_type, payloads_val, test_urls) = match input {
         WebSecScanInput::Wrapped { input } => {
             let parsed: serde_json::Value = serde_json::from_str(&input)
-                .map_err(|e| format!("failed to parse wrapped input: {}", e))?;
+                .map_err(|e| format!("failed to parse wrapped input: {e}"))?;
             let url = parsed
                 .get("url")
                 .and_then(|v| v.as_str())
@@ -1501,10 +1501,9 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
     }
     let res = baseline_res.ok_or_else(|| {
         format!(
-            "WebSecScan: baseline request failed after 3 attempts. Last error: {}. \
+            "WebSecScan: baseline request failed after 3 attempts. Last error: {last_err}. \
          The target may be offline, behind a firewall, or refusing connections. \
-         Try using bash with curl as a fallback.",
-            last_err
+         Try using bash with curl as a fallback."
         )
     })?;
     let status = res.status().as_u16();
@@ -1542,7 +1541,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
     // This site (testaspnet.vulnweb.com) sends HTML with mid-attribute line
     // breaks, so every pattern that spans tag attributes needs the `s` flag.
     let href_re = regex::Regex::new(r#"(?is)href\s*=\s*["']([^"'#]+)["']"#).unwrap();
-    let form_re = regex::Regex::new(r#"(?is)<form[^>]*>(.*?)</form>"#).unwrap();
+    let form_re = regex::Regex::new(r"(?is)<form[^>]*>(.*?)</form>").unwrap();
     let action_re = regex::Regex::new(r#"(?is)action\s*=\s*["']([^"']*)["']"#).unwrap();
     let method_re = regex::Regex::new(r#"(?is)method\s*=\s*["']([^"']+)["']"#).unwrap();
     let input_re =
@@ -1591,7 +1590,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
         "/index.aspx?id=1",
     ];
     for path in &common_paths {
-        let probe_url = format!("{}{}", base_url, path);
+        let probe_url = format!("{base_url}{path}");
         if queued_urls.insert(probe_url.clone()) {
             crawl_queue.push((probe_url, 1)); // treat as depth-1 so we don't recurse further
         }
@@ -1611,7 +1610,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
         let page_body = if page_url == url {
             body.clone()
         } else {
-            match client.get(&page_url).send().and_then(|r| r.text()) {
+            match client.get(&page_url).send().and_then(reqwest::blocking::Response::text) {
                 Ok(b) => {
                     page_bodies.push((page_url.clone(), b.clone()));
                     b
@@ -1630,7 +1629,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
             let full_link = if href.starts_with("http") {
                 href.to_string()
             } else if href.starts_with('/') {
-                format!("{}{}", base_url, href)
+                format!("{base_url}{href}")
             } else {
                 format!("{}/{}", page_url.trim_end_matches('/'), href)
             };
@@ -1650,7 +1649,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                 );
                 if !params.is_empty() {
                     for (k, _) in &params {
-                        let key = format!("GET:{}?{}", base_path, k);
+                        let key = format!("GET:{base_path}?{k}");
                         if seen_params.insert(key) {
                             discovered_params.push((
                                 base_path.clone(),
@@ -1663,7 +1662,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                         "type": "link",
                         "url": full_link,
                         "path": pu.path(),
-                        "parameters": params.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>()
+                        "parameters": params.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>()
                     }));
                 }
                 // Queue non-parameterized same-origin links for depth-1 crawl
@@ -1686,26 +1685,22 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                 .map(|m| m[1].to_string())
                 .unwrap_or_default();
             let method = method_re
-                .captures(form_html)
-                .map(|m| m[1].to_uppercase())
-                .unwrap_or_else(|| "GET".to_string());
+                .captures(form_html).map_or_else(|| "GET".to_string(), |m| m[1].to_uppercase());
 
             let form_action_url = if action.is_empty() || action == "#" {
                 page_url.clone()
             } else if action.starts_with("http") {
                 action.clone()
             } else if action.starts_with('/') {
-                format!("{}{}", base_url, action)
+                format!("{base_url}{action}")
             } else {
                 // Relative URL — resolve against the current page using the URL crate
                 // so "login.aspx" on page "http://host/login.aspx" → "http://host/login.aspx"
                 // rather than the incorrect "http://host/login.aspx/login.aspx"
                 if let Ok(base) = url::Url::parse(&page_url) {
-                    base.join(&action)
-                        .map(|u| u.to_string())
-                        .unwrap_or_else(|_| {
+                    base.join(&action).map_or_else(|_| {
                             format!("{}/{}", page_url.trim_end_matches('/'), action)
-                        })
+                        }, |u| u.to_string())
                 } else {
                     format!("{}/{}", page_url.trim_end_matches('/'), action)
                 }
@@ -1728,7 +1723,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                         }
                         continue;
                     }
-                    let key = format!("{}:{}?{}", method, form_action_url, name);
+                    let key = format!("{method}:{form_action_url}?{name}");
                     if seen_params.insert(key) {
                         discovered_params.push((
                             form_action_url.clone(),
@@ -1905,7 +1900,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
         }
         for f in &findings {
             let fs = f.to_string();
-            if !all.iter().any(|e| e.to_string() == fs) {
+            if !all.iter().any(|e| *e == fs) {
                 all.push(f.clone());
             }
         }
@@ -2166,7 +2161,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                             if let Ok(b) = res.text() {
                                 let lb = b.to_lowercase();
                                 let evidence_url =
-                                    format!("POST {}?{}=<payload>", endpoint_url, param_name);
+                                    format!("POST {endpoint_url}?{param_name}=<payload>");
                                 let mut matched = false;
                                 // SQLi — DB error signatures
                                 if lb.contains("sql syntax")
@@ -2381,7 +2376,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
         let furl = f.get("url").and_then(|v| v.as_str()).unwrap_or("");
         // For injection findings, dedupe key = vuln + param portion of url
         // Strip specific payload details: "POST url?param=<payload>" → key on param
-        let key = format!("{}|{}", vuln, furl);
+        let key = format!("{vuln}|{furl}");
         if seen_vuln_url.insert(key) {
             deduped_findings.push(f.clone());
         }
@@ -2402,14 +2397,14 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let furl = finding.get("url").and_then(|v| v.as_str()).unwrap_or("");
-        let key = format!("{}|{}", vuln, furl);
+        let key = format!("{vuln}|{furl}");
         let already = all_findings.iter().any(|f| {
             let ev = f
                 .get("vulnerability")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let eu = f.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            format!("{}|{}", ev, eu) == key
+            format!("{ev}|{eu}") == key
         });
         if !already {
             all_findings.push(finding.clone());
@@ -2427,7 +2422,7 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
         "headers": headers,
         "pages_crawled": crawled_pages.len(),
         "discovered_endpoints": discovered_endpoints.len(),
-        "discovered_parameters": discovered_params.iter().map(|(ep, p, m)| format!("{} [{}] -> {}", ep, m, p)).collect::<Vec<_>>(),
+        "discovered_parameters": discovered_params.iter().map(|(ep, p, m)| format!("{ep} [{m}] -> {p}")).collect::<Vec<_>>(),
         "payloads_tested": payloads.len(),
         "findings_count": deduped_findings.len(),
         "findings": deduped_findings
@@ -2841,30 +2836,30 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
     html.push_str(&format!(r#"
         <div style="display:grid; grid-template-columns: repeat(5, 1fr); gap:1rem; margin-bottom:3rem; text-align:center;">
             <div style="background:var(--critical-bg); border:1px solid var(--critical); border-radius:8px; padding:1.5rem;">
-                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--critical);">{}</div>
+                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--critical);">{n_critical}</div>
                 <div style="font-family:'Orbitron',sans-serif; font-size:0.75rem; color:var(--critical); letter-spacing:1px; margin-top:0.5rem;">CRITICAL</div>
             </div>
             <div style="background:var(--high-bg); border:1px solid var(--high); border-radius:8px; padding:1.5rem;">
-                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--high);">{}</div>
+                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--high);">{n_high}</div>
                 <div style="font-family:'Orbitron',sans-serif; font-size:0.75rem; color:var(--high); letter-spacing:1px; margin-top:0.5rem;">HIGH</div>
             </div>
             <div style="background:var(--medium-bg); border:1px solid var(--medium); border-radius:8px; padding:1.5rem;">
-                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--medium);">{}</div>
+                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--medium);">{n_medium}</div>
                 <div style="font-family:'Orbitron',sans-serif; font-size:0.75rem; color:var(--medium); letter-spacing:1px; margin-top:0.5rem;">MEDIUM</div>
             </div>
             <div style="background:var(--low-bg); border:1px solid var(--low); border-radius:8px; padding:1.5rem;">
-                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--low);">{}</div>
+                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--low);">{n_low}</div>
                 <div style="font-family:'Orbitron',sans-serif; font-size:0.75rem; color:var(--low); letter-spacing:1px; margin-top:0.5rem;">LOW</div>
             </div>
             <div style="background:var(--info-bg); border:1px solid var(--info); border-radius:8px; padding:1.5rem;">
-                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--info);">{}</div>
+                <div style="font-family:'Orbitron',sans-serif; font-size:2.5rem; font-weight:900; color:var(--info);">{n_info}</div>
                 <div style="font-family:'Orbitron',sans-serif; font-size:0.75rem; color:var(--info); letter-spacing:1px; margin-top:0.5rem;">INFO</div>
             </div>
         </div>
         <div style="text-align:center; margin-bottom:3rem; font-family:'Fira Code',monospace; color:var(--text-muted); font-size:0.9rem; letter-spacing:1px;">
-            TOTAL FINDINGS: <span style="color:var(--accent-cyan); font-weight:700;">{}</span>
+            TOTAL FINDINGS: <span style="color:var(--accent-cyan); font-weight:700;">{total}</span>
         </div>
-"#, n_critical, n_high, n_medium, n_low, n_info, total));
+"#));
 
     // Try to extract the findings array
     let findings_array = if findings_val.is_array() {
@@ -2932,55 +2927,46 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
 
                 html.push_str(&format!(
                     r#"
-            <div class="finding-card {}">
+            <div class="finding-card {sev_lower}">
                 <div class="finding-header">
-                    <h2 class="finding-title">{}</h2>
-                    <span class="badge {}">{}</span>
+                    <h2 class="finding-title">{title_e}</h2>
+                    <span class="badge {sev_lower}">{severity_e}</span>
                 </div>
                 
                 <div class="meta-grid">
                     <div class="meta-item">
                         <span class="meta-label">CVSS Score</span>
-                        <span class="meta-value">{}</span>
+                        <span class="meta-value">{cvss_e}</span>
                     </div>
                     <div class="meta-item">
                         <span class="meta-label">CWE</span>
-                        <span class="meta-value">{}</span>
+                        <span class="meta-value">{cwe_e}</span>
                     </div>
                 </div>
 
                 <div class="section-title">Description</div>
-                <p>{}</p>
+                <p>{desc_e}</p>
 
                 <div class="section-title">Impact</div>
-                <p>{}</p>
+                <p>{impact_e}</p>
 
                 <div class="section-title">Remediation</div>
-                <p>{}</p>
-"#,
-                    sev_lower,
-                    title_e,
-                    sev_lower,
-                    severity_e,
-                    cvss_e,
-                    cwe_e,
-                    desc_e,
-                    impact_e,
-                    remediation_e
+                <p>{remediation_e}</p>
+"#
                 ));
 
                 if !evidence.is_empty() {
                     html.push_str(&format!(r#"
                 <div style="margin-top: 2rem;">
-                    <button class="evidence-toggle" onclick="document.getElementById('evidence-{}').classList.toggle('open')">
+                    <button class="evidence-toggle" onclick="document.getElementById('evidence-{idx}').classList.toggle('open')">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
                         VIEW EVIDENCE LOG
                     </button>
-                    <div id="evidence-{}" class="evidence-content">
-                        <pre><code>{}</code></pre>
+                    <div id="evidence-{idx}" class="evidence-content">
+                        <pre><code>{evidence_e}</code></pre>
                     </div>
                 </div>
-"#, idx, idx, evidence_e));
+"#));
                 }
 
                 html.push_str("            </div>\n");
@@ -2997,7 +2983,7 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
         "#);
     }
 
-    html.push_str(r#"        </div>"#);
+    html.push_str(r"        </div>");
 
     // Always attach the raw JSON at the bottom for debugging or alternative tooling
     html.push_str(
@@ -3008,22 +2994,22 @@ fn run_vuln_report(input: VulnReportInput) -> Result<String, String> {
 
     // Try to pretty print the raw JSON string
     if let Ok(pretty) = serde_json::to_string_pretty(&findings_val) {
-        html.push_str(&pretty.replace("<", "&lt;").replace(">", "&gt;"));
+        html.push_str(&pretty.replace('<', "&lt;").replace('>', "&gt;"));
     } else {
         html.push_str(
             &input
                 .findings_json
-                .replace("<", "&lt;")
-                .replace(">", "&gt;"),
+                .replace('<', "&lt;")
+                .replace('>', "&gt;"),
         );
     }
 
     html.push_str(
-        r#"</code></pre>
+        r"</code></pre>
         </div>
     </div>
 </body>
-</html>"#,
+</html>",
     );
 
     std::fs::write(&input.output_path, html).map_err(|e| e.to_string())?;

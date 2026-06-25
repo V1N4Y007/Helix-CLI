@@ -550,7 +550,7 @@ impl StreamState {
                         index: 0,
                     }));
                 }
-                let text_index = if self.thinking_started { 1 } else { 0 };
+                let text_index = u32::from(self.thinking_started);
                 if !self.text_started {
                     self.text_started = true;
                     events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
@@ -622,7 +622,7 @@ impl StreamState {
         }
         if self.text_started && !self.text_finished {
             self.text_finished = true;
-            let text_index = if self.thinking_started { 1 } else { 0 };
+            let text_index = u32::from(self.thinking_started);
             events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
                 index: text_index,
             }));

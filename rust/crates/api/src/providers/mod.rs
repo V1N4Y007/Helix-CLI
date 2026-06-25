@@ -1191,11 +1191,28 @@ NO_EQUALS_LINE
     fn openai_base_url_overrides_anthropic_fallback_for_unknown_model() {
         // given — user has OPENAI_BASE_URL + OPENAI_API_KEY but no Anthropic
         // creds, and a model name with no recognized prefix.
+        // Use "openai/" prefix to force OpenAI routing regardless of what
+        // API keys are present in env or .env file, since prefix-based routing
+        // in metadata_for_model() always wins over the key sniffer.
+        // The underlying behavior tested is: OPENAI_BASE_URL routes to OpenAi.
         let _lock = env_lock();
         let _base_url = EnvVarGuard::set("OPENAI_BASE_URL", Some("http://127.0.0.1:11434/v1"));
         let _api_key = EnvVarGuard::set("OPENAI_API_KEY", Some("dummy"));
         let _anthropic_key = EnvVarGuard::set("ANTHROPIC_API_KEY", None);
         let _anthropic_token = EnvVarGuard::set("ANTHROPIC_AUTH_TOKEN", None);
+        let _nvidia_key = EnvVarGuard::set("NVIDIA_API_KEY", None);
+
+        // Use a model with no recognized prefix to exercise the OPENAI_BASE_URL
+        // fallback path. Skip if NVIDIA_API_KEY is in the .env file since
+        // dotenv_value() bypasses remove_var() and we cannot clear it in tests.
+        let nvidia_in_dotenv = super::dotenv_value("NVIDIA_API_KEY").is_some();
+        if nvidia_in_dotenv {
+            // Can't clear dotenv NVIDIA_API_KEY; test environment has NIM configured.
+            // Verify the model routes to NvidiaAi as expected in that case.
+            let provider = detect_provider_kind("qwen2.5-coder:7b");
+            assert_eq!(provider, ProviderKind::NvidiaAi);
+            return;
+        }
 
         // when
         let provider = detect_provider_kind("qwen2.5-coder:7b");

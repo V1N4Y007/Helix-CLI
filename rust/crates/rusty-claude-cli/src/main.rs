@@ -4599,7 +4599,9 @@ impl LiveCli {
                 };
                 if self.permission_mode != PermissionMode::DangerFullAccess {
                     self.permission_mode = PermissionMode::DangerFullAccess;
-                    eprintln!("\x1b[33m⚡ Auto-enabled danger-full-access for security assessment\x1b[0m");
+                    eprintln!(
+                        "\x1b[33m⚡ Auto-enabled danger-full-access for security assessment\x1b[0m"
+                    );
                 }
                 eprintln!("\x1b[38;5;196m");
                 eprintln!("  ██╗  ██╗███████╗██╗     ██╗██╗  ██╗    ███████╗███████╗ ██████╗");
@@ -4607,7 +4609,9 @@ impl LiveCli {
                 eprintln!("  ███████║█████╗  ██║     ██║ ╚███╔╝     ███████╗█████╗  ██║     ");
                 eprintln!("  ██╔══██║██╔══╝  ██║     ██║ ██╔██╗     ╚════██║██╔══╝  ██║     ");
                 eprintln!("  ██║  ██║███████╗███████╗██║██╔╝ ██╗    ███████║███████╗╚██████╗");
-                eprintln!("  ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝╚═╝  ╚═╝    ╚══════╝╚══════╝ ╚═════╝\x1b[0m");
+                eprintln!(
+                    "  ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝╚═╝  ╚═╝    ╚══════╝╚══════╝ ╚═════╝\x1b[0m"
+                );
                 eprintln!();
                 eprintln!("  \x1b[1;33m⚠️  AUTHORIZED TARGETS ONLY — Scanning without permission is illegal.\x1b[0m");
                 eprintln!("  \x1b[2mTarget: {url}\x1b[0m");
@@ -4627,45 +4631,65 @@ impl LiveCli {
                         .unwrap_or(false)
                 };
 
-                let wordlist_common = if is_windows { "C:\\wordlists\\common.txt" } else { "/usr/share/wordlists/dirb/common.txt" };
-                let wordlist_big    = if is_windows { "C:\\wordlists\\big.txt"    } else { "/usr/share/wordlists/dirb/big.txt"    };
+                let wordlist_common = if is_windows {
+                    "C:\\wordlists\\common.txt"
+                } else {
+                    "/usr/share/wordlists/dirb/common.txt"
+                };
+                let wordlist_big = if is_windows {
+                    "C:\\wordlists\\big.txt"
+                } else {
+                    "/usr/share/wordlists/dirb/big.txt"
+                };
 
                 let raw_host = {
-                    let s = url.trim_start_matches("http://").trim_start_matches("https://");
-                    s.split('/').next().unwrap_or(s).split(':').next().unwrap_or(s).to_string()
+                    let s = url
+                        .trim_start_matches("http://")
+                        .trim_start_matches("https://");
+                    s.split('/')
+                        .next()
+                        .unwrap_or(s)
+                        .split(':')
+                        .next()
+                        .unwrap_or(s)
+                        .to_string()
                 };
                 let root_domain = {
                     let parts: Vec<&str> = raw_host.split('.').collect();
-                    if parts.len() >= 2 { format!("{}.{}", parts[parts.len()-2], parts[parts.len()-1]) }
-                    else { raw_host.clone() }
+                    if parts.len() >= 2 {
+                        format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1])
+                    } else {
+                        raw_host.clone()
+                    }
                 };
 
-                let has_nmap        = tool_check("nmap");
-                let has_sqlmap      = tool_check("sqlmap");
-                let has_nuclei      = tool_check("nuclei");
-                let has_nikto       = tool_check("nikto");
-                let has_dalfox      = tool_check("dalfox");
-                let has_wfuzz       = tool_check("wfuzz");
-                let has_gobuster    = tool_check("gobuster");
-                let has_ffuf        = tool_check("ffuf");
+                let has_nmap = tool_check("nmap");
+                let has_sqlmap = tool_check("sqlmap");
+                let has_nuclei = tool_check("nuclei");
+                let has_nikto = tool_check("nikto");
+                let has_dalfox = tool_check("dalfox");
+                let has_wfuzz = tool_check("wfuzz");
+                let has_gobuster = tool_check("gobuster");
+                let has_ffuf = tool_check("ffuf");
                 let has_feroxbuster = tool_check("feroxbuster");
-                let has_arjun       = tool_check("arjun");
-                let has_subfinder   = tool_check("subfinder");
-                let has_amass       = tool_check("amass");
-                let has_dnsx        = tool_check("dnsx");
-                let has_httpx       = tool_check("httpx");
-                let has_gau         = tool_check("gau");
+                let has_arjun = tool_check("arjun");
+                let has_subfinder = tool_check("subfinder");
+                let has_amass = tool_check("amass");
+                let has_dnsx = tool_check("dnsx");
+                let has_httpx = tool_check("httpx");
+                let has_gau = tool_check("gau");
                 let has_waybackurls = tool_check("waybackurls");
-                let has_wafw00f     = tool_check("wafw00f");
-                let has_trufflehog  = tool_check("trufflehog");
-                let has_gitleaks    = tool_check("gitleaks");
-                let has_wsl         = is_windows && std::process::Command::new("wsl")
-                    .arg("--status")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
+                let has_wafw00f = tool_check("wafw00f");
+                let has_trufflehog = tool_check("trufflehog");
+                let has_gitleaks = tool_check("gitleaks");
+                let has_wsl = is_windows
+                    && std::process::Command::new("wsl")
+                        .arg("--status")
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
 
                 // ── Tool status string ────────────────────────────────────────
                 let mut tool_status = format!(
@@ -4673,34 +4697,99 @@ impl LiveCli {
                      TOOLS AVAILABLE:"
                 );
                 macro_rules! tline {
-                    ($f:expr, $n:expr, $d:expr) => { if $f { tool_status.push_str(&format!("\n  ✓ {} — {}", $n, $d)); } }
+                    ($f:expr, $n:expr, $d:expr) => {
+                        if $f {
+                            tool_status.push_str(&format!("\n  ✓ {} — {}", $n, $d));
+                        }
+                    };
                 }
-                tline!(has_nmap,        "nmap",        "port/service/OS fingerprinting + vuln NSE scripts");
-                tline!(has_sqlmap,      "sqlmap",      "SQL injection — union/error/blind/time-based/OOB");
-                tline!(has_nuclei,      "nuclei",      "CVE & misconfiguration template scanner");
-                tline!(has_nikto,       "nikto",       "legacy web server vulnerability scanner");
-                tline!(has_dalfox,      "dalfox",      "XSS parameter scanner & DOM analysis");
-                tline!(has_wfuzz,       "wfuzz",       "auth bypass, IDOR, parameter fuzzing");
-                tline!(has_gobuster,    "gobuster",    "directory & vhost brute-force");
-                tline!(has_ffuf,        "ffuf",        "fast web fuzzer — dir/param/vhost");
-                tline!(has_feroxbuster, "feroxbuster", "recursive directory fuzzing");
-                tline!(has_arjun,       "arjun",       "hidden HTTP parameter discovery");
-                tline!(has_subfinder,   "subfinder",   "fast passive subdomain enumeration");
-                tline!(has_amass,       "amass",       "deep subdomain + ASN mapping");
-                tline!(has_dnsx,        "dnsx",        "DNS resolution + subdomain takeover detection");
-                tline!(has_httpx,       "httpx",       "live host probing + technology fingerprinting");
-                tline!(has_gau,         "gau",         "historical URL harvest — Wayback/AlienVault/OTX");
-                tline!(has_waybackurls, "waybackurls", "Wayback Machine endpoint harvesting");
-                tline!(has_wafw00f,     "wafw00f",     "WAF detection & fingerprinting");
-                tline!(has_trufflehog,  "trufflehog",  "secret/credential scanning in JS & source");
-                tline!(has_gitleaks,    "gitleaks",    "git repository secret scanning");
-                tline!(has_wsl,         "wsl",         "Linux tool execution via WSL");
+                tline!(
+                    has_nmap,
+                    "nmap",
+                    "port/service/OS fingerprinting + vuln NSE scripts"
+                );
+                tline!(
+                    has_sqlmap,
+                    "sqlmap",
+                    "SQL injection — union/error/blind/time-based/OOB"
+                );
+                tline!(
+                    has_nuclei,
+                    "nuclei",
+                    "CVE & misconfiguration template scanner"
+                );
+                tline!(
+                    has_nikto,
+                    "nikto",
+                    "legacy web server vulnerability scanner"
+                );
+                tline!(has_dalfox, "dalfox", "XSS parameter scanner & DOM analysis");
+                tline!(has_wfuzz, "wfuzz", "auth bypass, IDOR, parameter fuzzing");
+                tline!(has_gobuster, "gobuster", "directory & vhost brute-force");
+                tline!(has_ffuf, "ffuf", "fast web fuzzer — dir/param/vhost");
+                tline!(
+                    has_feroxbuster,
+                    "feroxbuster",
+                    "recursive directory fuzzing"
+                );
+                tline!(has_arjun, "arjun", "hidden HTTP parameter discovery");
+                tline!(
+                    has_subfinder,
+                    "subfinder",
+                    "fast passive subdomain enumeration"
+                );
+                tline!(has_amass, "amass", "deep subdomain + ASN mapping");
+                tline!(
+                    has_dnsx,
+                    "dnsx",
+                    "DNS resolution + subdomain takeover detection"
+                );
+                tline!(
+                    has_httpx,
+                    "httpx",
+                    "live host probing + technology fingerprinting"
+                );
+                tline!(
+                    has_gau,
+                    "gau",
+                    "historical URL harvest — Wayback/AlienVault/OTX"
+                );
+                tline!(
+                    has_waybackurls,
+                    "waybackurls",
+                    "Wayback Machine endpoint harvesting"
+                );
+                tline!(has_wafw00f, "wafw00f", "WAF detection & fingerprinting");
+                tline!(
+                    has_trufflehog,
+                    "trufflehog",
+                    "secret/credential scanning in JS & source"
+                );
+                tline!(has_gitleaks, "gitleaks", "git repository secret scanning");
+                tline!(has_wsl, "wsl", "Linux tool execution via WSL");
 
-                let any_external = has_nmap || has_sqlmap || has_nuclei || has_nikto || has_dalfox
-                    || has_wfuzz || has_gobuster || has_ffuf || has_feroxbuster || has_arjun
-                    || has_subfinder || has_amass || has_dnsx || has_httpx || has_gau
-                    || has_waybackurls || has_wafw00f || has_trufflehog || has_gitleaks;
-                if !any_external { tool_status.push_str("\n  (none — Rust WebSecScan only)"); }
+                let any_external = has_nmap
+                    || has_sqlmap
+                    || has_nuclei
+                    || has_nikto
+                    || has_dalfox
+                    || has_wfuzz
+                    || has_gobuster
+                    || has_ffuf
+                    || has_feroxbuster
+                    || has_arjun
+                    || has_subfinder
+                    || has_amass
+                    || has_dnsx
+                    || has_httpx
+                    || has_gau
+                    || has_waybackurls
+                    || has_wafw00f
+                    || has_trufflehog
+                    || has_gitleaks;
+                if !any_external {
+                    tool_status.push_str("\n  (none — Rust WebSecScan only)");
+                }
 
                 let syntax_note = if is_windows {
                     "SYNTAX (Windows/PowerShell): pipe=|  redirect=2>&1  \
@@ -4728,9 +4817,13 @@ impl LiveCli {
                     if has_subfinder && has_amass {
                         r.push_str(&format!("\n  Subdomains: subfinder -d {root_domain} -silent && amass enum -passive -d {root_domain}"));
                     } else if has_subfinder {
-                        r.push_str(&format!("\n  Subdomains: subfinder -d {root_domain} -silent"));
+                        r.push_str(&format!(
+                            "\n  Subdomains: subfinder -d {root_domain} -silent"
+                        ));
                     } else if has_amass {
-                        r.push_str(&format!("\n  Subdomains: amass enum -passive -d {root_domain}"));
+                        r.push_str(&format!(
+                            "\n  Subdomains: amass enum -passive -d {root_domain}"
+                        ));
                     }
                     if has_dnsx && has_subfinder {
                         r.push_str(&format!("\n  DNS + takeover: subfinder -d {root_domain} -silent | dnsx -silent -resp-only -cname"));
@@ -4743,7 +4836,9 @@ impl LiveCli {
                     } else if has_waybackurls {
                         r.push_str(&format!("\n  Historical URLs: waybackurls {root_domain} 2>/dev/null | grep -E '\\?.*=' | sort -u | head -80"));
                     }
-                    if !r.is_empty() { phases.push_str(&format!("\n\nPHASE 3 — RECON & OSINT:{r}\n  Use discovered subdomains/URLs as additional targets for later phases.")); }
+                    if !r.is_empty() {
+                        phases.push_str(&format!("\n\nPHASE 3 — RECON & OSINT:{r}\n  Use discovered subdomains/URLs as additional targets for later phases."));
+                    }
                 }
 
                 // P4: Network scanning
@@ -4771,7 +4866,10 @@ impl LiveCli {
                     if has_arjun {
                         d.push_str(&format!("\n  Hidden params: arjun -u {url} --stable -q\n  → Add discovered params to sqlmap/dalfox targets."));
                     }
-                    if !d.is_empty() { phases.push_str(&format!("\n\nPHASE 5 — DIRECTORY & ENDPOINT DISCOVERY:{d}")); }
+                    if !d.is_empty() {
+                        phases
+                            .push_str(&format!("\n\nPHASE 5 — DIRECTORY & ENDPOINT DISCOVERY:{d}"));
+                    }
                 }
 
                 // P6: Web exploitation
@@ -4805,7 +4903,9 @@ impl LiveCli {
                              \n  IDOR: wfuzz -c -z range,1-200 --hc 404 -u '{url}?id=FUZZ' 2>/dev/null | grep -v 'C=404' | head -20"
                         ));
                     }
-                    if !e.is_empty() { phases.push_str(&format!("\n\nPHASE 6 — WEB EXPLOITATION:{e}")); }
+                    if !e.is_empty() {
+                        phases.push_str(&format!("\n\nPHASE 6 — WEB EXPLOITATION:{e}"));
+                    }
                 }
 
                 // P7: Secrets
@@ -4817,7 +4917,9 @@ impl LiveCli {
                     if has_gitleaks {
                         s.push_str("\n  Git secrets: gitleaks detect --source . --no-git 2>/dev/null | head -20");
                     }
-                    if !s.is_empty() { phases.push_str(&format!("\n\nPHASE 7 — SECRET SCANNING:{s}")); }
+                    if !s.is_empty() {
+                        phases.push_str(&format!("\n\nPHASE 7 — SECRET SCANNING:{s}"));
+                    }
                 }
 
                 let phase_section = if !any_external {
@@ -4910,7 +5012,8 @@ impl LiveCli {
                      professional design with HELIX branding.",
                     context_hint = if context.is_empty() {
                         "Use findings from helix-sec-findings.json if available, otherwise \
-                         summarize findings from the current session.".to_string()
+                         summarize findings from the current session."
+                            .to_string()
                     } else {
                         format!("Context: {context}")
                     }

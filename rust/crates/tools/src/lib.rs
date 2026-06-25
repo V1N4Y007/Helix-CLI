@@ -1610,7 +1610,11 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
         let page_body = if page_url == url {
             body.clone()
         } else {
-            match client.get(&page_url).send().and_then(reqwest::blocking::Response::text) {
+            match client
+                .get(&page_url)
+                .send()
+                .and_then(reqwest::blocking::Response::text)
+            {
                 Ok(b) => {
                     page_bodies.push((page_url.clone(), b.clone()));
                     b
@@ -1685,7 +1689,8 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                 .map(|m| m[1].to_string())
                 .unwrap_or_default();
             let method = method_re
-                .captures(form_html).map_or_else(|| "GET".to_string(), |m| m[1].to_uppercase());
+                .captures(form_html)
+                .map_or_else(|| "GET".to_string(), |m| m[1].to_uppercase());
 
             let form_action_url = if action.is_empty() || action == "#" {
                 page_url.clone()
@@ -1698,9 +1703,10 @@ fn run_web_sec_scan(input: WebSecScanInput) -> Result<String, String> {
                 // so "login.aspx" on page "http://host/login.aspx" → "http://host/login.aspx"
                 // rather than the incorrect "http://host/login.aspx/login.aspx"
                 if let Ok(base) = url::Url::parse(&page_url) {
-                    base.join(&action).map_or_else(|_| {
-                            format!("{}/{}", page_url.trim_end_matches('/'), action)
-                        }, |u| u.to_string())
+                    base.join(&action).map_or_else(
+                        |_| format!("{}/{}", page_url.trim_end_matches('/'), action),
+                        |u| u.to_string(),
+                    )
                 } else {
                     format!("{}/{}", page_url.trim_end_matches('/'), action)
                 }

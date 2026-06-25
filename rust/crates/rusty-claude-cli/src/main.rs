@@ -4779,7 +4779,7 @@ impl LiveCli {
                     let mut e = String::new();
                     if has_nuclei {
                         e.push_str(&format!(
-                            "\n  Templates: nuclei -u {url} -severity medium,high,critical -silent -rl 20\
+                            "\n  Templates: nuclei -u {url} -severity medium,high,critical -silent -rl 20 -update-templates 2>/dev/null; nuclei -u {url} -severity medium,high,critical -silent -rl 20\
                              \n  Also run against all subdomains discovered in Phase 3."
                         ));
                     }
